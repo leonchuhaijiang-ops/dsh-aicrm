@@ -33,9 +33,10 @@
     "setup": "node scripts/setup.mjs",
     "doctor": "node scripts/doctor.mjs",
     "check-no-pii": "node scripts/check-no-pii.mjs",
+    "check-no-data": "node scripts/check-no-data.mjs",
     "smoke": "node scripts/smoke.mjs",
     "hooks": "node scripts/install-hooks.mjs",
-    "check": "node scripts/doctor.mjs && node scripts/check-no-pii.mjs",
+    "check": "node scripts/doctor.mjs && node scripts/check-no-pii.mjs && node scripts/check-no-data.mjs",
     "syntax": "node --check dsh/index.js && node --check dsh/client.js && node --check dsh/ai.js && node --check dsh/rag.js && node --check dsh/config.js && node --check lib/sales-lib.js"
   },
   "keywords": [

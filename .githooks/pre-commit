@@ -19,3 +19,10 @@ if [ -n "$BAD" ]; then
   echo "$BAD"
   exit 1
 fi
+
+# 3) 数据隔断：仓库工作区里也不许放数据类文件（防「数据目录被设进仓库」）
+if ! node scripts/check-no-data.mjs; then
+  echo ""
+  echo "✗ 提交被拦：数据与工具必须物理分开（见 docs/privacy.md 第 9 节）。"
+  exit 1
+fi

@@ -113,14 +113,15 @@ AI 功能（作战卡、实时话术、周复盘、合同复核……）需要�
 
 - **仓库里只有工具**：全部源码 + 文档 + `templates/营销资料库/` 里 4 份**原创**示例语料。**没有**任何真实客户表、备份、日志、合同、配置档或密钥。作者自己跑数据用的目录在这台机器上另处，从不进 git。
 - **git 历史也干净**：整个历史只保留少量提交（首版 + 文档修订），历史 diff 已逐条扫过手机号、邮箱、令牌、本机路径，无命中。
-- **硬拦落盘**：`.gitignore` 挡住 `*.xlsx / *.csv / *.docx / logs/ / 备份/ / 快照/ / sales.config.json / .env`；本地 `pre-commit` 钩子（`npm run hooks` 安装）在提交前跑 `check-no-pii`；CI 里再跑一遍。两道闸门任一命中即失败。
+- **硬拦落盘**：`.gitignore` 挡住 `*.xlsx / *.csv / *.docx / logs/ / 备份/ / 快照/ / sales.config.json / .env`；本地 `pre-commit` 钩子（`npm run hooks` 安装）在提交前依次跑 `check-no-pii`（隐私/密钥）与 `check-no-data`（数据隔断：已跟踪文件与工作区都不许出现 Excel/CSV/合同/配置/日志）；CI 里再各跑一遍。任何一道命中即失败。
 - **不回传**：工具代码里没有遥测、没有上报端点、没有作者服务器；唯一出网口是**你自己配的模型厂商**（第 2 节）。作者拿不到你的任何数据，也没有地方接收。
 - **别人用的时候**：各自的数据目录在自己机器上，初始化时由 `scripts/setup.mjs` 或看板向导现建空表；你装我装，数据互不相干。
 
 你想自己核一遍：
 
 ```bash
-npm run check-no-pii                                  # 当前工作区
+npm run check-no-pii                                  # 当前工作区：隐私/密钥
+npm run check-no-data                                 # 数据隔断：仓库里有没有数据类文件
 git log --all -p | grep -nE "[0-9]{11}|ghp_|sk-[A-Za-z0-9]{16,}"   # 全历史
 ```
 
