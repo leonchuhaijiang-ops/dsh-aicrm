@@ -1,0 +1,58 @@
+{
+  "name": "dsh-sales",
+  "version": "1.0.0",
+  "description": "AI-CRM 客资管理系统：面向 B2B 销售的本地优先看板插件（Excel 为唯一事实源，数据只存在你自己的目录里）",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./dsh/index.js",
+    "./client": "./dsh/client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "files": [
+    "dsh",
+    "lib",
+    "scripts",
+    "templates",
+    "docs",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "doctor": "node scripts/doctor.mjs",
+    "check-no-pii": "node scripts/check-no-pii.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "check": "node scripts/doctor.mjs && node scripts/check-no-pii.mjs",
+    "syntax": "node --check dsh/index.js && node --check dsh/client.js && node --check dsh/ai.js && node --check dsh/rag.js && node --check dsh/config.js && node --check lib/sales-lib.js"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "crm",
+    "sales",
+    "excel",
+    "b2b"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "xlsx": "^0.18.5"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

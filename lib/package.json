@@ -1,0 +1,6 @@
+{
+  "name": "dsh-sales-lib",
+  "private": true,
+  "type": "commonjs",
+  "description": "销售数据层（CommonJS）：读写本地 xlsx，独立于 DSH 运行，可单机命令调用。"
+}

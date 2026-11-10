@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }} · Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20', '22']
+
+    steps:
+      - name: 检出
+        uses: actions/checkout@v4
+
+      - name: Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 安装依赖
+        # 不生成 lockfile：本仓库暂不提交锁文件，也避免污染工作区
+        run: npm install --no-audit --no-fund --no-package-lock
+
+      - name: 语法检查（node --check 各入口）
+        run: npm run syntax
+
+      - name: 隐私与品牌扫描（全仓严格，不加 --root 缩范围）
+        run: node scripts/check-no-pii.mjs
+
+      - name: 初始化数据目录（端到端）
+        shell: bash
+        env:
+          DSH_SALES_CONFIG: ${{ runner.temp }}/sales.config.json
+        run: node scripts/setup.mjs --data-dir "$RUNNER_TEMP/sales-data" --yes
+
+      - name: 体检（doctor）
+        shell: bash
+        env:
+          DSH_SALES_CONFIG: ${{ runner.temp }}/sales.config.json
+        run: node scripts/doctor.mjs --data-dir "$RUNNER_TEMP/sales-data"
+
+      - name: 集成冒烟（假 ctx 加载插件 + 真跑 /sales 路由与数据层）
+        shell: bash
+        env:
+          DSH_SALES_CONFIG: ${{ runner.temp }}/sales.config.json
+        run: node scripts/smoke.mjs
+
+      - name: 数据层 CLI 自检（sales-lib check）
+        shell: bash
+        env:
+          DSH_SALES_CONFIG: ${{ runner.temp }}/sales.config.json
+        run: node lib/sales-lib.js check --dir "$RUNNER_TEMP/sales-data"
+
+      - name: 工作区不应被测试污染
+        shell: bash
+        env:
+          DSH_SALES_CONFIG: ${{ runner.temp }}/sales.config.json
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::自检过程改动了工作区，请把产物写进临时目录（\$RUNNER_TEMP）"
+            git status --porcelain
+            exit 1
+          fi

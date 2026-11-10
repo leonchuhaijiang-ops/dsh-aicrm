@@ -1,0 +1,15 @@
+# dsh-sales bundle patch —— 销售客资管理看板（DSH 桌面端插件）
+#
+# host 半：dsh/index.js
+#   - 注册 15 个模型工具（任务/客户/跟进/周报/战役/合同等）
+#   - 注册 /sales/* HTTP 前缀路由，供看板读取配置、初始化数据目录、调用模型
+# client 半：dsh/client.js
+#   - sidebar.footer.action ×1（sales-panel：侧边栏入口）
+#   - shell.overlay ×2（sales-board：全屏看板；sales-live-panel：通话记录台浮层）
+#   - conversation.input.left ×1（sales-live-wire，渲染 null，仅挂载记录用）
+# 数据层：<数据目录>/ 下的 Excel 文件（销售客户-主表.xlsx / 销售客户-流水表.xlsx），
+#   由 lib/sales-lib.js 读写；数据目录由 dsh/config.js 解析（环境变量 SALE_DIR >
+#   配置文件 sales.config.json > 默认目录），不写死任何绝对路径。
+- insert:
+    - id: sales
+      name: 'dsh-sales'

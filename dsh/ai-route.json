@@ -1,0 +1,25 @@
+{
+  "_doc": "模型通道分工表：purpose → route。每次调用现读本文件，改分工不用重启。route=local → 本机模型端点（如 Ollama；数据不出本机，但小模型能力有限、输出要短）；route=cloud → 当前会话所用模型（能力强，请求会发送给模型厂商）。建议只把「短输出」的活放本地（几百字以内），要写上千字的动作放云端，否则容易撞超时。onLocalFail 决定本地失败后去哪：'cloud' 转云端再试（结果里标 fellBack='cloud'），'rule' 不转、由调用方回落规则版。localCooldownMs = 本地失败后的熔断冷却毫秒（0 = 关闭熔断）。",
+  "_updated": "2026-11-10",
+  "_status": "默认 enabled:false：全部动作走当前会话的云端模型，零 API key、开箱即用。若要启用本机模型，把 enabled 改成 true，并在 local 段填你自己的 provider/model（例如 Ollama 的 provider 通常是 local，模型名按本机实际拉取的写）。注：若在插件设置里选了「本机模型」或「指定模型」，设置优先于本文件的分工表。",
+  "enabled": false,
+  "onLocalFail": "cloud",
+  "localCooldownMs": 120000,
+  "local": {
+    "provider": "local",
+    "model": "qwen3:8b",
+    "reasoningEffort": "off"
+  },
+  "cloud": {
+    "reasoningEffort": "off",
+    "perPurpose": {}
+  },
+  "routes": {
+    "sales-live": "cloud",
+    "sales-clienttip": "cloud",
+    "sales-next": "cloud",
+    "sales-brief": "cloud",
+    "sales-digest": "cloud",
+    "contract": "cloud"
+  }
+}

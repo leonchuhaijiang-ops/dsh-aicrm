@@ -1,0 +1,40 @@
+# 统一换行：仓库里一律 LF（Windows 上检出也不会变成 CRLF）
+* text=auto eol=lf
+
+# 代码与文本
+*.js      text eol=lf
+*.cjs     text eol=lf
+*.mjs     text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.txt     text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+LICENSE        text eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析异常
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# 二进制：不做换行转换、不做文本 diff
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.webp    binary
+*.ico     binary
+*.xlsx    binary
+*.xls     binary
+*.docx    binary
+*.pdf     binary
+*.zip     binary
+*.tgz     binary
+*.woff    binary
+*.woff2   binary
+
+# 锁文件：不参与统计与合并（也不该被当作文本审阅）
+pnpm-lock.yaml      merge=binary
+package-lock.json   merge=binary
+yarn.lock           merge=binary

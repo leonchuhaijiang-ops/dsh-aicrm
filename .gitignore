@@ -1,0 +1,49 @@
+# ---- 依赖 ----
+node_modules/
+.pnpm-store/
+
+# ---- 本机配置与运行时 ----
+# 配置档里记着你本机的数据目录路径，不进仓库
+sales.config.json
+.sales-lock
+logs/
+*.log
+
+# ---- 客户数据：仓库里永远不放任何真实表 ----
+data/
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.docx
+
+# ---- 备份与快照 ----
+备份/
+backup/
+backups/
+快照/
+*.bak
+*.bak.*
+*.copy
+*~
+
+# ---- 本地临时 / 测试产物 ----
+.tmp-*
+tmp-setup-test/
+tmp-test/
+tmp/
+coverage/
+dist/
+build/
+
+# ---- 环境变量与密钥 ----
+.env
+.env.*
+!.env.example
+
+# ---- 编辑器与系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
