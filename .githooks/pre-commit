@@ -1,0 +1,21 @@
+#!/bin/sh
+# 提交前闸门（本仓库是公开的，一次泄漏就是一次事故）。
+# 安装：npm run hooks  →  git config core.hooksPath .githooks
+set -e
+
+# 1) 隐私/密钥/本机路径扫描
+if ! node scripts/check-no-pii.mjs; then
+  echo ""
+  echo "✗ 提交被拦：命中隐私规则（见上面的行号）。"
+  echo "  处理方式：删掉或改成占位符；不要为了让检查通过而放宽规则。"
+  exit 1
+fi
+
+# 2) 兜底：即使 .gitignore 被改动，也不许把数据/配置/日志文件提交进来
+BAD=$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -Ei '\.(xlsx|xls|xlsm|csv|docx|log|bak)$|(^|/)(sales\.config\.json|\.env)$' || true)
+if [ -n "$BAD" ]; then
+  echo "✗ 提交被拦：以下文件是数据 / 配置 / 日志，不进仓库："
+  echo "$BAD"
+  exit 1
+fi

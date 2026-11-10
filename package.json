@@ -34,6 +34,7 @@
     "doctor": "node scripts/doctor.mjs",
     "check-no-pii": "node scripts/check-no-pii.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "hooks": "node scripts/install-hooks.mjs",
     "check": "node scripts/doctor.mjs && node scripts/check-no-pii.mjs",
     "syntax": "node --check dsh/index.js && node --check dsh/client.js && node --check dsh/ai.js && node --check dsh/rag.js && node --check dsh/config.js && node --check lib/sales-lib.js"
   },

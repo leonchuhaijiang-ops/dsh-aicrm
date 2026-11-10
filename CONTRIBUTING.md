@@ -32,6 +32,9 @@ node scripts/setup.mjs --data-dir "/tmp/dsh-sales-dev" --yes
 npm run syntax        # node --check 各入口文件
 npm run check         # 体检 + 隐私扫描（只读，不改数据）
 npm run smoke         # 集成冒烟：假 ctx 加载插件，跑真 /sales 路由与数据层
+
+# 装一次提交前钩子（强烈建议）
+npm run hooks         # = git config core.hooksPath .githooks
 ```
 
 > `npm run smoke` 不需要 DSH 宿主、也不调真模型：它用假 ctx 加载 `dsh/index.js`，走真 HTTP 路由与真数据层（未配置 → 写配置 → 相对路径拒绝 → setup 建表 → 幂等 → 读数据 → `sales_log` 写读闭环 → `configtest` 假模型 → egress → RAG）。**首次跑会在 `node_modules` 里造一个 `@deepseek-ai/dsh-tools` 桩**——`node_modules` 已 gitignore，不会进仓库，也不会影响 DSH 里的真实宿主。
