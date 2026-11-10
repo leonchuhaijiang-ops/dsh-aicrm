@@ -125,6 +125,7 @@ ok(r.json && r.json.ok === true && r.json.data && r.json.data.total === 0, 'summ
 console.log('\n[8] 写读闭环：sales_log 工具（首触，写流水 + 主表）')
 const toolLog = tools.find((t) => t && (t.name === 'sales_log' || (t.id && String(t.id).includes('log'))))
 ok(!!toolLog, '找到 sales_log 工具', tools.map((t) => t && t.name))
+let cid = null
 if (toolLog) {
   // 手工造一条客户行：直接调数据层 add
   const lib = path.join(ROOT, 'lib', 'sales-lib.js')
@@ -135,13 +136,25 @@ if (toolLog) {
   let addJson = null
   try { addJson = JSON.parse(add.stdout) } catch (e) {}
   ok(addJson && addJson.ok === true, '数据层 add 建了一条客户', (addJson && (addJson.message || addJson.error)) || add.stderr.slice(0, 200))
-  const cid = addJson && addJson.data && (addJson.data.id || addJson.data.customerId)
+  cid = addJson && ((addJson.data && (addJson.data.id || addJson.data.customerId)) || addJson.id)
   if (cid) {
     const w = await toolLog.execute({ id: cid, date: '2026-11-10', type: '首触', method: '电话', what: '冒烟测试：打通一次', react: '有意向', stage: '客户触达' })
     ok(w && w.ok === true, 'sales_log 写入成功', w && (w.error || (w.data && w.data.ok === false && w.data.message)))
   }
   r = await call('GET', '/sales/summary')
   ok(r.json && r.json.ok === true && r.json.data && r.json.data.total >= 1, '写完 summary total>=1', r.json && r.json.data && r.json.data.total)
+}
+
+console.log('\n[8b] 其他跟进记录桶：归不进 SOP 节点的跟进有地方放')
+if (toolLog && cid) {
+  const toolSop = tools.find((t) => t && t.name === 'sales_sop')
+  const wb = await toolLog.execute({ id: cid, date: '2026-11-10', method: '微信', type: '客户反馈', what: '随口聊了聊行业，没有谈到具体环节' , stage: '其他跟进记录' })
+  const wbd = (wb && wb.data) || wb || {}
+  ok(wbd.ok === true && wbd.stageBucket === '其他跟进记录' && wbd.stage === '', '显式落「其他跟进记录」：阶段留空 + 回执带 stageBucket', wbd)
+  const sp = await toolSop.execute({ id: cid })
+  const spd = (sp && sp.data) || sp || {}
+  ok(!!(spd.sop && spd.sop.unlabeledLabel === '其他跟进记录' && spd.sop.unlabeled.length === 1), 'SOP 返回 unlabeledLabel=其他跟进记录 且收下这 1 条', spd.sop && { label: spd.sop.unlabeledLabel, n: spd.sop.unlabeled.length })
+  ok(!!(spd.sop && spd.sop.stages.every((x) => x.count === 0 || x.stage === '客户触达')), '这条记录没把主表当前阶段推走', spd.sop && spd.sop.stages.filter((x) => x.count).map((x) => x.stage))
 }
 
 console.log('\n[9] 模型通道状态与探活')

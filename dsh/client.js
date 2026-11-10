@@ -1546,6 +1546,7 @@ function apply(ctx) {
             (sop.exits || []).filter(x => x.count || x.current).map(stageBlock),
             (sop.unlabeled && sop.unlabeled.length) ? React.createElement('div', null,
               React.createElement('div', { style: { fontSize: 12, color: THEME.text2, marginTop: 4 } }, '其他跟进记录（' + sop.unlabeled.length + ' 条）'),
+              React.createElement('div', { style: { fontSize: 10, color: THEME.text2, opacity: .75, paddingLeft: 2 } }, '归不到 13 段/出口的记录放这里（老数据没写阶段，或记录时显式选「其他跟进记录」）'),
               sop.unlabeled.map(recLine)) : null,
             aiBlock(d.ai, () => loadSopAi(c.id), '🧠 AI 话术'))
         }
