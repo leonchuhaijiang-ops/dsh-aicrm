@@ -1135,6 +1135,47 @@ function apply(ctx) {
             setWizMsg({ tone: 'err', text: '初始化异常：' + String((e && e.message) || e) })
           })
         }
+        // 示例数据（demo）：给刚初始化完的空看板一点"看得见的内容"。
+        //   生成/清除都由后端 lib 负责，前端只按 mode 调一次；清除只删它自己生成的 DEMO-xxx。
+        function demoRun(mode) {
+          return fetchData('sales.demo', { mode: mode })
+        }
+        function reloadBoard() {
+          try { loadTasks() } catch (e) {}
+          try { loadSummary() } catch (e) {}
+          try { loadFirstCall() } catch (e) {}
+        }
+        // 向导里的「先生成 3 条示例看看」：保存设置 → 初始化 → 生成示例 → 关向导进看板
+        function wizardDemo() {
+          if (!wizardValidateDir()) return
+          const D = currentDraft()
+          setWizBusy(true)
+          setWizMsg({ tone: 'info', text: '正在保存设置、初始化数据目录并生成示例客户…' })
+          fetchData('sales.configset', patchOf(D)).then(function (r) {
+            if (!r || !r.ok) throw new Error(String((r && r.error) || '设置保存失败（后端没有返回原因）'))
+            if (r.data) setCfg(r.data)
+            return fetchData('sales.setup', {})
+          }).then(function (s) {
+            if (!s || !s.ok) throw new Error(String((s && s.error) || '初始化失败（后端没有返回原因）'))
+            applyCfg(s.data.config || cfg)
+            return demoRun('seed')
+          }).then(function (d) {
+            setWizBusy(false)
+            if (!d || !d.ok) {
+              setWizMsg({ tone: 'err', text: '数据目录已建好，但示例数据没生成：' + String((d && d.error) || '后端没有返回原因') })
+              return
+            }
+            setNotice('已生成 3 条示例客户（不是真实数据，可一键清除）。在「⚙ 设置 → 示例数据」里清除。')
+            setWizOpen(false)
+            setWizStep(0)
+            setWizMsg(null)
+            setWizTest(null)
+            reloadBoard()
+          }).catch(function (e) {
+            setWizBusy(false)
+            setWizMsg({ tone: 'err', text: '初始化异常：' + String((e && e.message) || e) })
+          })
+        }
         function skipWizard() {
           setWizOpen(false)
           setWizMsg(null)
@@ -1190,6 +1231,7 @@ function apply(ctx) {
             wizStep < 2 ? uiBtn('下一步 →', function () { if (wizardValidateDir()) { setWizStep(wizStep + 1); setWizMsg(null) } }, false, wizBusy) : null,
             React.createElement('span', { style: { flex: 1 } }),
             (c.configured && c.configError) ? uiBtn('暂时跳过，直接进入看板', function () { skipWizard() }, false, wizBusy) : null,
+            wizStep === 2 ? uiBtn('先生成 3 条示例看看', function () { wizardDemo() }, false, wizBusy) : null,
             uiBtn(wizBusy ? '处理中…' : '保存设置', function () { wizardSave() }, false, wizBusy),
             uiBtn(wizBusy ? '处理中…' : '初始化数据目录并开始', function () { wizardFinish() }, true, wizBusy))
           return React.createElement(BoardErrorBoundary, null,
@@ -1291,6 +1333,22 @@ function apply(ctx) {
             setPanelMsg({ tone: 'err', text: '初始化异常：' + String((e && e.message) || e) })
           })
         }
+        // 设置面板里的「示例数据」：生成 / 清除（清除只删 DEMO-xxx，真实客户不动）
+        function panelDemo(mode) {
+          setPanelMsg({ tone: 'info', text: mode === 'clean' ? '正在清除示例数据…' : '正在生成示例客户…' })
+          demoRun(mode).then(function (r) {
+            if (!r || !r.ok) { setPanelMsg({ tone: 'err', text: String((r && r.error) || '操作失败（后端没有返回原因）') }); return }
+            const d = r.data || {}
+            let text
+            if (mode === 'clean') text = d.changed ? ('已清除示例客户 ' + (d.removed || 0) + ' 条；真实客户没动。') : '没有示例数据需要清除。'
+            else text = d.already ? '示例数据已经生成过了，没有重复写入。' : ('已生成示例客户 ' + (d.created || 0) + ' 条。')
+            setPanelMsg({ tone: 'ok', text: text })
+            reloadBoard()
+            loadDiag()
+          }).catch(function (e) {
+            setPanelMsg({ tone: 'err', text: '操作异常：' + String((e && e.message) || e) })
+          })
+        }
         function settingsPanel() {
           const D = currentDraft()
           const c = cfg || {}
@@ -1328,6 +1386,12 @@ function apply(ctx) {
                 React.createElement('input', { type: 'checkbox', checked: D.features.rag, onChange: function (e) { patchFeatures({ rag: !!e.target.checked }) }, style: { accentColor: THEME.blue } }),
                 React.createElement('span', {}, '启用 RAG（检索本地语料辅助写作）'),
                 React.createElement('span', { style: { fontSize: 11, color: 'var(--text-3, #999)' } }, '关闭后 AI 只靠模型自身知识'))),
+              uiSection('示例数据', React.createElement('div', {},
+                React.createElement('div', { style: { fontSize: 11.5, color: 'var(--text-2, #888)', lineHeight: 1.7, marginBottom: 8 } },
+                  '想先看看看板长什么样？可以生成 3 条示例客户（公司名带「示例」字样、电话是示例号段，不是真实数据）。清除只删这 3 条，碰不到你自己录的客户。'),
+                React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+                  uiBtn('生成示例数据', function () { panelDemo('seed') }, false),
+                  uiBtn('清除示例数据', function () { panelDemo('clean') }, false)))),
               uiSection('诊断（只读）', React.createElement('div', {}, rows.map(function (kv) { return uiKV(kv[0], kv[1]) }))),
               uiMsgEl(panelMsg)))
           return React.createElement('div', { key: 'sales-settings-panel', style: panelShell() },

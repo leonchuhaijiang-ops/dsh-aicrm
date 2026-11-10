@@ -1752,7 +1752,8 @@ export function apply(ctx, config = {}) {
     // 2026-10-21 夜（协议 v2）：写库预览带参数（客户ID/字段），但只读不落盘 → 只收 POST（GET 带 body 不规整）。
     logplan: 1, settleplan: 1,
     // 开源版（2026-11）：配置写入 / 建库 / 模型探活 —— 都有副作用（写配置文件、建目录表、花钱调模型）→ 只收 POST。
-    configset: 1, setup: 1, configtest: 1 }
+    //   demo 会真的往表里写 3 条示例客户（或清除它们）→ 同样只收 POST。
+    configset: 1, setup: 1, configtest: 1, demo: 1 }
   const HTTP_WRITE_INTENT = {
     settle: () => true,                                                   // cmdSettle 恒写两表
     enterprise: (a) => !!(a && a.facts),                                  // 带 facts = 台账留痕
@@ -2364,6 +2365,15 @@ export function apply(ctx, config = {}) {
           case 'configtest': {
             const probe = await probeModelChannel(ctx)
             result = probe.ok ? { ok: true, data: probe } : { ok: false, error: probe.error, data: probe }
+            break
+          }
+          // 示例数据（demo）：给刚初始化完的空看板一点"看得见的内容"，可一键清除。
+          //   只认 { mode: 'seed' | 'clean' | 'info' }，默认 seed；写入仍走 lib 的写入口。
+          case 'demo': {
+            const mode = String((args && args.mode) || 'seed').toLowerCase()
+            if (!['seed', 'clean', 'info'].includes(mode)) { result = { ok: false, error: 'mode 只支持 seed / clean / info' }; break }
+            const r = await run('demo', { mode })
+            result = r.ok ? { ok: true, data: r.data } : r
             break
           }
           default: res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ ok: false, error: 'unknown method: ' + method })); return

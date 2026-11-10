@@ -159,6 +159,23 @@ r = await call('GET', '/sales/egress')
 const rag = r.json && r.json.data && r.json.data.rag
 ok(rag && rag.ok === true && (rag.chunks || 0) > 0, 'RAG 装载了示例语料: ' + JSON.stringify(rag && { chunks: rag.chunks, sources: rag.sources, enabled: rag.enabled }))
 
+console.log('\n[12] 示例数据 demo：seed → 幂等 → clean 只删自己')
+// 口径：demo 只认登记过的 DEMO-001~003；clean 之后总量必须回到 seed 之前（真实数据一条不少）
+r = await call('GET', '/sales/summary')
+const totalBeforeDemo = (r.json && r.json.data && r.json.data.total) || 0
+r = await call('POST', '/sales/demo', { mode: 'seed' })
+ok(r.json && r.json.ok === true && r.json.data && r.json.data.created === 3, 'demo seed 生成 3 条示例客户', r.json && (r.json.error || r.json.data))
+r = await call('POST', '/sales/demo', { mode: 'seed' })
+ok(r.json && r.json.ok === true && r.json.data && r.json.data.already === true, 'demo 重复 seed 幂等（不重复写）', r.json && (r.json.error || r.json.data))
+r = await call('GET', '/sales/summary')
+ok(r.json && r.json.data && r.json.data.total === totalBeforeDemo + 3, 'seed 后总量 +3', r.json && r.json.data && r.json.data.total)
+r = await call('GET', '/sales/demo')
+ok(r.code === 405, 'GET /sales/demo 被拒（只收 POST）', r.code)
+r = await call('POST', '/sales/demo', { mode: 'clean' })
+ok(r.json && r.json.ok === true && r.json.data && r.json.data.removed === 3, 'demo clean 删了 3 条示例', r.json && (r.json.error || r.json.data))
+r = await call('GET', '/sales/summary')
+ok(r.json && r.json.data && r.json.data.total === totalBeforeDemo, 'clean 后总量回到 seed 前（真实客户没动）', r.json && r.json.data && r.json.data.total)
+
 try { dispose && dispose() } catch (e) {}
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败；临时目录 ' + tmp)
 process.exit(fail ? 1 : 0)

@@ -165,6 +165,7 @@ Windows 上默认就是 `%USERPROFILE%\.dsh\sales.config.json`（即用户主目
 | `/sales/configset` | POST | 打补丁式改配置：`{dataDir?, ai?, features?, profile?}`。`dataDir` 不是绝对路径会返回 `ok:false` + 错误信息 |
 | `/sales/setup` | POST | 建目录骨架 + 空表 + 补示例语料（幂等） |
 | `/sales/configtest` | POST | 真发一次极短模型请求，验证当前通道能不能用 |
+| `/sales/demo` | POST | 示例数据开关：`{"mode":"seed"}` 生成 3 条示例客户、`clean` 清除、`info` 查看（只删它生成的 ID） |
 
 ```bash
 curl -s http://127.0.0.1:<DSH端口>/sales/config
