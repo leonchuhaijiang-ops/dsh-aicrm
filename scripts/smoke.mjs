@@ -189,6 +189,34 @@ ok(r.json && r.json.ok === true && r.json.data && r.json.data.removed === 3, 'de
 r = await call('GET', '/sales/summary')
 ok(r.json && r.json.data && r.json.data.total === totalBeforeDemo, 'clean 后总量回到 seed 前（真实客户没动）', r.json && r.json.data && r.json.data.total)
 
+console.log('\n[13] 全库 SOP 归位审计 + 历史补阶段（默认不猜）')
+const libEntry = path.join(ROOT, 'lib', 'sales-lib.js')
+const toolSop13 = tools.find((t) => t && t.name === 'sales_sop')
+const runLib = (payload) => {
+  const r = spawnSync(process.execPath, [libEntry, 'run', '--dir', dataDir], { input: JSON.stringify(payload), encoding: 'utf8' })
+  try { return JSON.parse(String(r.stdout || '').trim()) } catch (e) { return { ok: false, raw: String(r.stdout || '').slice(0, 300), stderr: String(r.stderr || '').slice(0, 300) } }
+}
+if (toolLog && cid) {
+  // 造一条「阶段为空但内容能判出来」的记录：显式落桶 + 正文写"报价"
+  await toolLog.execute({ id: cid, date: '2026-11-10', method: '微信', type: '客户反馈', what: '发了报价单和年度框架条款', stage: '其他跟进记录' })
+  const sp = await toolSop13.execute({ id: cid })
+  const spd = (sp && sp.data) || sp || {}
+  const cov = spd.sop && spd.sop.coverage
+  ok(!!(cov && cov.follows === cov.staged + cov.unlabeled && cov.ok === true), 'SOP 带 coverage 且 跟进=段内+桶', cov)
+  const dry = runLib({ cmd: 'backfillstage', args: [{ mode: 'dry' }] })
+  ok(dry.ok === true && dry.infer === 'type' && dry.fillable === 0, '补阶段默认只认类型硬映射（这几条不猜）', { infer: dry.infer, fillable: dry.fillable })
+  const dryc = runLib({ cmd: 'backfillstage', args: [{ mode: 'dry', infer: 'content' }] })
+  ok(dryc.ok === true && dryc.fillable >= 1, '--infer content 能判出"发了报价单"这条', { fillable: dryc.fillable, byStage: dryc.byStage })
+  const ap = runLib({ cmd: 'backfillstage', args: [{ mode: 'apply', infer: 'content' }] })
+  ok(ap.ok === true && ap.applied >= 1, 'apply 只写阶段列', { applied: ap.applied })
+  const sp2 = await toolSop13.execute({ id: cid })
+  const s2 = (sp2 && sp2.data) || sp2 || {}
+  const quote = (s2.sop && s2.sop.stages || []).find((x) => x.stage === '方案报价')
+  ok(!!(quote && quote.count >= 1), '补完后这条进了「方案报价」段，桶里少一条', { quote: quote && quote.count, cov: s2.sop && s2.sop.coverage })
+  const au = runLib({ cmd: 'sopaudit', args: [{}] })
+  ok(au.ok === true && au.totals && au.totals.ok === true && au.totals.badCount === 0, '全库审计：所有有记录的客户都归位（0 条丢）', au.totals)
+}
+
 try { dispose && dispose() } catch (e) {}
 console.log('\n结果：' + pass + ' 通过 / ' + fail + ' 失败；临时目录 ' + tmp)
 process.exit(fail ? 1 : 0)

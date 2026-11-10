@@ -2,6 +2,18 @@
 
 本项目从 1.0.0 起以开源形式发布。版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)：`MAJOR.MINOR.PATCH`。
 
+## [1.2.0] - 2026-11-10
+
+### 新增
+
+- **全库 SOP 归位审计** `npm run audit`（`scripts/sop-audit.mjs`，只读）：把**每一个有跟进记录的客户**都过一遍，逐客户核对「跟进条数 = 段内 + 其他跟进记录桶」，对不上就列客户 ID；顺带列出「有记录但主表当前阶段为空」的客户。新增数据层命令 `sopaudit`。
+- **看板 SOP 面板显示覆盖率**：标题下从「共 N 条跟进」变为「共 N 条跟进：段内 x · 其他跟进记录 y」，每个客户的记录去向一眼可见（数据层 `buildSop` 新增 `coverage` 字段：`{follows, staged, unlabeled, changes, ok}`）。
+- **历史流水补阶段** `npm run backfill`（`scripts/backfill-stage.mjs`）：默认 dry-run，只认「类型 → 阶段」硬映射（首触→客户触达、试用回访→产品演示、老客服务→成交签约、放弃跟进→推进终止）；`--infer content` 才启用内容关键词判段；`--apply` 前自动备份两张 xlsx，只改流水「阶段」列，**不动主表当前阶段**，判不出来的一律留桶。新增数据层命令 `backfillstage`。
+
+### 说明
+
+- 有记录但「当前阶段为空」的客户，面板提示改为「已有 N 条记录落在下面的段里——补一次带阶段（stage）的跟进即可把当前阶段推上去」，不再只显示「尚未纳入 SOP」。
+
 ## [1.1.1] - 2026-11-10
 
 ### 新增

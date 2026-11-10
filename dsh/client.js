@@ -1541,7 +1541,7 @@ function apply(ctx) {
             React.createElement('div', { style: { fontWeight: 700, color: THEME.blue, marginBottom: 4 } },
               '📋 ' + (d.name || c.name || '') + ' 的 SOP　' + (sop.progress || '') + ' · 结果：' + (sop.result || '—')),
             React.createElement('div', { style: { fontSize: 11, color: THEME.text2, marginBottom: 6 } },
-              (sop.note || '') + (sop.nextStage ? '　下一段：' + sop.nextStage : '') + '　（共 ' + (sop.total || 0) + ' 条跟进）'),
+              (sop.note || '') + (sop.nextStage ? '　下一段：' + sop.nextStage : '') + '　（共 ' + (sop.total || 0) + ' 条跟进' + (sop.coverage ? '：段内 ' + sop.coverage.staged + ' · 其他跟进记录 ' + sop.coverage.unlabeled : '') + '）'),
             (sop.stages || []).map(stageBlock),
             (sop.exits || []).filter(x => x.count || x.current).map(stageBlock),
             (sop.unlabeled && sop.unlabeled.length) ? React.createElement('div', null,
