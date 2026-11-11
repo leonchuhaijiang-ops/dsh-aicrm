@@ -1,15 +1,16 @@
 // AI-CRM客资管理系统 - Host 端（正式插件版）
 // 本地私有插件（dsh-sales），数据以 <SALE_DIR>（默认 <数据目录>）下的 Excel 为唯一事实源。
 // 结构:
-//   - SALES_TOOL_COUNT(15) 个模型工具 (sales_tasks / sales_view / sales_log / sales_sop / sales_summary / sales_next /
+//   - SALES_TOOL_COUNT(16) 个模型工具 (sales_tasks / sales_view / sales_log / sales_sop / sales_summary / sales_next /
 //     sales_live / sales_plan / sales_settle / sales_brief / sales_enterprise / sales_flywheel / sales_campaign /
-//     sales_digest / sales_contract) 经 ctx.tools.register 注册，
+//     sales_digest / sales_contract / sales_profile) 经 ctx.tools.register 注册，
 //     同步调用 sales-lib.js（shell.execute 前台，直接返回数据，不经后台 job 轮询——正式插件环境无动态 harness）。
 //   - HTTP 端点 (kind: 'prefix', path: /sales/*) 供 client 半 fetch 调用；**当前 40 个 case**（SALES_ROUTE_CASE_COUNT；
 //     2026-10-09.4 起 = 原 22 个 + 本机语音转写桥 4 个：speech / speechprepare / transcribe / livecheck；2026-10-12 起
 //     + 模型面 1 个：ai；2026-10-13 起 + 六分类页 3 个：standard / custom / pending；2026-10-15 起
 //     + 合同台账 1 个：contract；2026-10-21 起 + 四类节奏 1 个：cadence + 右侧对话框 1 个：assistant；
-//     2026-10-21 夜起 + 写库预览 2 个：logplan / settleplan；此数**不含** switch 的 default）。方法: POST /sales/<method> body=json；GET 只允许读方法
+//     2026-10-21 夜起 + 写库预览 2 个：logplan / settleplan；2026-11-10 开源版 + 4 个：config / configset / setup /
+//     configtest；2026-11-10 1.1.0 + demo；2026-11-11 1.3.0 + 客户档案 2 个：profile / stagefix；此数**不含** switch 的 default）。方法: POST /sales/<method> body=json；GET 只允许读方法
 //     （写方法 settle/enterprise/flywheel/campaign 非 POST → 405，载荷带写意图（settle 恒真 / facts / by+to / referral）→ 403，见下方 B1 加固；
 //       2026-10-09.4 起 transcribe/speechprepare/livecheck 也走「只收 POST」）。
 // 沙箱: 不再写死模式；每次调用现取宿主/会话策略（见 makeRunner）。
@@ -52,8 +53,8 @@ const GUARD_BASE_TOOLS = [...GUARD_NET_TOOLS, ...GUARD_SHELL_TOOLS].map((n) => (
 // 2026-10-13 批次 5（审计 F14）：工具数 / HTTP case 数**单一事实源**。
 //   原来头注与 cordis.patch.yml 各写一份（13 个工具 / 27 个 case），改代码不同步 → 文档漂移。
 //   现在头注从这里生成，cordis.patch.yml 的注释要改时以这两条为准（注册循环与 switch 才是最终事实）。
-const SALES_TOOL_COUNT = 15
-const SALES_ROUTE_CASE_COUNT = 40
+const SALES_TOOL_COUNT = 16
+const SALES_ROUTE_CASE_COUNT = 42
 
 export const name = 'sales'
 // 2026-09-14 修正（两个都是上一版"加固"引入的回归，已止血）：
@@ -70,6 +71,14 @@ export const inject = ['tools', 'shell', 'webServer', 'sandboxPolicy', 'llm', 'a
 //   **每次现取**（不缓存）：首次设置向导写完配置后，同一进程里的后续调用立刻跟上；/sales/egress 回显实际 workdir。
 function dataDir() { return resolveDataDir() }
 function logPath(name) { return path.join(dataDir(), 'logs', name) }
+// 2026-11-11（1.3.0）：客户识别一律用手机号。这里只做「去噪」——把 +86/空格/横线/Excel 的 .0 去掉；
+//   合法性（11 位、能对上谁）由数据层 resolveCustomer 判，前端/工具不需要各写一套。
+function normPhoneLoose(v) {
+  let s = String(v == null ? '' : v).replace(/\.0+$/, '').replace(/[^\d]/g, '')
+  if (s.length === 13 && s.slice(0, 2) === '86') s = s.slice(2)
+  if (s.length === 15 && s.slice(0, 4) === '0086') s = s.slice(4)
+  return s.length === 11 ? s : String(v == null ? '' : v).trim()
+}
 const ERR_MAX = 20
 const CONTRACT_DESTRUCTIVE = { sign: 1, void: 1, archive: 1 }
 const CONTRACT_READ_ACTIONS = { list: 1, get: 1, templates: 1, download: 1, review: 1 }
@@ -553,14 +562,14 @@ const outSchema = { type: 'object', additionalProperties: true }
 //   42.6 tok/s 但装不下长提示词）。所以：live 300 tok ≈ 12s → 给 16s；clienttip 600 tok ≈ 25s → 给 30s。
 //   next 的 900 tok ≈ 37s 放不进任何合理预算 → 它已在 ai-route.json 里改走云端。
 //   2026-10-15 合同初审：900 tok 出风险清单，走云端（ai-route.json routes.contract='cloud'）→ 30s。
-const AI_TIMEOUT = { live: 16000, clienttip: 30000, next: 12000, brief: 20000, digest: 20000, contract: 30000 }
+const AI_TIMEOUT = { live: 16000, clienttip: 30000, next: 12000, brief: 20000, digest: 20000, contract: 30000, profile: 15000 }
 // 2026-10-13 批次 6b：**云端档的思考档不再由下面调用点传的 'low' 决定** —— 一律现读 ai-route.json 的
 //   `cloud.reasoningEffort`（默认 'off'：云端网关 网关不指定档位＝思考链开着，实测 16s 出不来字；'none' 实测 898ms 出正文）。
 //   调用点传的 effort 现在只是**兜底**（分工表没写 cloud 时才用；也没有别的调用方）。改档不用重启。
-const AI_MAXCHARS = { live: 600, clienttip: 400, next: 2000, brief: 4000, digest: 4000, contract: 3000 }
+const AI_MAXCHARS = { live: 600, clienttip: 400, next: 2000, brief: 4000, digest: 4000, contract: 3000, profile: 800 }
 // 批次 4：**生成上限**（token）。不传就落 pi-ai 默认 32768 —— 本地档（ctx 8192）会一路生成到把正文挤空。
 //   数值按「这段答案本来该多长」定：接话 300 / 文案 600 / 作战卡 900 / 工作台·复盘 1200。
-const AI_MAXTOKENS = { live: 300, clienttip: 600, next: 900, brief: 1200, digest: 1200, contract: 900 }
+const AI_MAXTOKENS = { live: 300, clienttip: 600, next: 900, brief: 1200, digest: 1200, contract: 900, profile: 700 }
 // 批次 1 开 live/clienttip（通话现场 + 整段文案）；批次 2 再挂 next/brief/digest（作战卡/今日工作台/周复盘）。
 // 全部都由人点按钮触发、只产文字、绝不写库；模型失败一律回落规则版（用户看到的永远不是空白）。
 // 2026-10-15 合同初审（contract）：AI 只是在**规则版之上**补一段说明；AI 不可用/超时/编数字 →
@@ -601,6 +610,50 @@ async function aiClientTip(ctx, tipData) {
     route: a.route, local: !!a.local, fellBack: a.fellBack || '', firstError: a.firstError || '',
     ms: a.ms, error: a.error || '', timedOut: !!a.timedOut, truncated: !!a.truncated, mask: p.stats,
     ragN: (p.rag || []).length, droppedSources: c.dropped || [],
+  }
+}
+
+// ---------- 2026-11-11（1.3.0）：客户档案 AI 提炼（purpose=profile） ----------
+//   用户口径：记一笔在 AI 助手输入框完成；档案同理——AI 只把「客户表已有的 + 最近跟进」整理成介绍文字，
+//   **绝不落盘**（落盘要人在档案面板点「💾 保存档案」）。只写事实里有的，没有的写「待补」；
+//   不写客户ID（1.3.0 起对外一律用手机号）。
+const PROFILE_LABEL_CN = {
+  intro: '介绍', industry: '行业', scale: '规模', people: '关键人', chain: '决策链', need: '需求',
+  product: '关注产品', budget: '预算', rival: '竞对', compliance: '合规要求', strategy: '打法', source: '线索来源',
+}
+async function aiProfileDraft(ctx, viewData, curProfile) {
+  const pr = (viewData && viewData.profile) || {}
+  const flows = Array.isArray(viewData && viewData.flow) ? viewData.flow.slice(0, 12) : []
+  const facts = [
+    ['公司', pr.company], ['联系人', pr.name], ['城市', pr.city], ['客户等级', pr.level],
+    ['跟进状态', pr.status], ['当前SOP阶段', pr.stage], ['来源', pr.source], ['建档类型', pr.type],
+  ].filter(function (kv) { return kv[1] }).map(function (kv) { return kv[0] + '：' + String(kv[1]) }).join('\n')
+  const flowText = flows.map(function (f) {
+    const what = String((f && f.what) || '').slice(0, 160)
+    return [f && f.date, f && f.type, what].filter(Boolean).join(' ')
+  }).filter(Boolean).join('\n')
+  const cur = curProfile ? Object.keys(curProfile)
+    .filter(function (k) { return typeof curProfile[k] === 'string' && curProfile[k] })
+    .map(function (k) { return PROFILE_LABEL_CN[k] ? PROFILE_LABEL_CN[k] + '：' + String(curProfile[k]).slice(0, 200) : '' })
+    .filter(Boolean).join('\n') : ''
+  const system = [
+    '你是销售助理。请根据给到的客户事实，写一段「客户/公司介绍」，给销售在看板上快速了解这家客户。',
+    '硬要求：① 只用事实里出现过的信息，事实里没有的一律写「待补」，绝不编造人名、电话、金额、案例、政策文号；',
+    '② 中文，180-320 字，纯文本 2-3 段（不要 markdown 标题、不要编号、不要列表符号）；',
+    '③ 不写客户编号/ID；④ 不写"我"做了什么的流水叙述，只写这家客户是谁、什么阶段、关心什么、下一步卡在哪。',
+  ].join('\n')
+  const body = ['【客户事实】', facts || '（客户表里只有极少信息）']
+  if (flowText) body.push('', '【最近跟进（新→旧，节选）】', flowText)
+  if (cur) body.push('', '【已有档案（可复用，过时的以事实为准）】', cur)
+  const a = await aiStream(ctx, {
+    purpose: 'sales-profile', system: system,
+    messages: [{ role: 'user', text: body.join('\n') }],
+    timeoutMs: AI_TIMEOUT.profile, maxChars: AI_MAXCHARS.profile, maxTokens: AI_MAXTOKENS.profile,
+    logPath: aiLogPath(),
+  })
+  return {
+    ok: !!a.ok, text: a.ok ? String(a.text || '').trim() : '', label: a.label, provider: a.provider,
+    model: a.model, route: a.route, local: !!a.local, ms: a.ms, error: a.error || '',
   }
 }
 
@@ -934,19 +987,25 @@ export function apply(ctx, config = {}) {
     try {
       if (cid) {
         const v = await run('view', cid)
-        if (!v || !v.ok || !v.data || !v.data.profile) return { text: '（消息里的客户ID ' + cid + ' 没查到档案，如实告诉你）', kind: 'id', hit: 0 }
+        if (!v || !v.ok || !v.data || !v.data.profile) return { text: '（消息里的客户编号没查到档案，如实告诉你）', kind: 'id', hit: 0 }
+        const profPhone = String((v.data.profile && v.data.profile.phone) || '')
         try { autoMask(mk, v.data) } catch (e) {}
-        return { text: '【插件已按你消息里的客户ID预查到的档案】\n' + mk.mask(profileTextOf(v)), kind: 'id', hit: 1 }
+        return { text: '【插件已按你消息里的客户预查到的档案】\n' + mk.mask(profileTextOf(v)), kind: 'id', hit: 1, topId: cid, topPhone: profPhone }
       }
       const r = await run('search', phone)
       const d = (r && r.data) || {}
       const rows = Array.isArray(d.hits) ? d.hits : []
-      if (!rows.length) return { text: '【插件已按你消息里的手机号 ' + phone + ' 查了一遍，库里没有这个客户】', kind: 'phone', hit: 0 }
+      if (!rows.length) return { text: '【插件已按你消息里的手机号 ' + phone + ' 查了一遍，库里没有这个客户】', kind: 'phone', hit: 0, queryPhone: phone }
       try { autoMask(mk, rows) } catch (e) {}
-      const lines = rows.slice(0, 3).map((x) => '- ' + (x.id || '') + ' ' + (x.name || '') + (x.company ? '（' + x.company + '）' : '')
+      const lines = rows.slice(0, 3).map((x) => '- ' + (x.name || '') + (x.company ? '（' + x.company + '）' : '')
         + '｜' + (x.level || '未定级') + '｜' + (x.stage || '未标注') + '｜状态 ' + (x.status || '')
         + (x.next ? '｜下次跟进 ' + x.next : ''))
-      return { text: '【插件已按你消息里的手机号 ' + phone + ' 预查到 ' + rows.length + ' 个客户】\n' + mk.mask(lines.join('\n')), kind: 'phone', hit: rows.length }
+      return {
+        text: '【插件已按你消息里的手机号 ' + phone + ' 预查到 ' + rows.length + ' 个客户】\n' + mk.mask(lines.join('\n')),
+        kind: 'phone', hit: rows.length, queryPhone: phone,
+        topId: rows.length === 1 ? String(rows[0].id || '') : '',
+        topPhone: rows.length === 1 ? phone : '',
+      }
     } catch (e) {
       return { text: '', kind: '', hit: 0, error: String((e && e.message) || e) }
     }
@@ -969,19 +1028,25 @@ export function apply(ctx, config = {}) {
     if (!d.ok || !cands.length) {
       return { text: '【插件已在本机解析你这条消息里提到的客户：客户表里没有匹配。不许瞎认，如实说没查到。】', kind: 'resolve', hit: 0, topId: '', unique: false }
     }
+    // 2026-11-11（用户 m02149）：对外只给手机号。手机号在 autoMask 之前先取下来（遮罩后是 <电话N>）。
+    const phoneOfId = new Map()
+    for (const x of cands) phoneOfId.set(String(x.id || ''), String(x.phone || '').trim())
     try { autoMask(mk, cands) } catch (e) { /* noop */ }
-    // 关键：名字用 mk.mask 出来的**占位符**，与模型在别处看到的一致 → 模型能对上"占位符=哪个客户ID"
-    const lines = cands.slice(0, 5).map((x) => '- 客户ID ' + String(x.id || '') + '｜' + mk.mask(String(x.name || ''))
+    const phLabel = (x) => (phoneOfId.get(String(x.id || '')) || '无手机号')
+    // 关键：名字用 mk.mask 出来的**占位符**，与模型在别处看到的一致 → 模型能对上"占位符=哪个客户"
+    const lines = cands.slice(0, 5).map((x) => '- ' + mk.mask(String(x.name || ''))
       + (x.contact ? '（联系人 ' + mk.mask(String(x.contact)) + '）' : '')
+      + '｜手机 ' + phLabel(x)
       + '｜' + String(x.level || '未定级') + (x.stage ? '｜' + x.stage : '') + (x.status ? '｜状态 ' + x.status : '')
       + '｜匹配 ' + String((x.matched || []).join('/') || '') + ' ' + Number(x.score || 0) + ' 分')
-    const head = d.unique
-      ? '【插件已在本机认出你这条消息说的是客户ID ' + String(d.topId || '') + '（唯一命中）——落库/查档案直接用这个ID，不许再反问"是哪个客户"】'
-      : '【插件已在本机解析你这条消息里提到的客户，候选 ' + cands.length + ' 个（分数高者优先；要落库必须用这里的客户ID，别自己编）】'
-    // 2026-10-22（用户 m01733）：把唯一命中的真名/联系人留给写卡用（面板上要显示公司名，不能只显示客户ID）
     const top0 = cands[0] || null
+    const topPhone = top0 ? String(phoneOfId.get(String(top0.id || '')) || '').trim() : ''
+    const head = d.unique
+      ? '【插件已在本机认出你这条消息说的是这个客户（唯一命中）——落库/查档案直接用它的手机号 ' + (topPhone || '（库里没有手机号，先补手机号）') + '，不许再反问"是哪个客户"，也不要用客户编号】'
+      : '【插件已在本机解析你这条消息里提到的客户，候选 ' + cands.length + ' 个（分数高者优先；要落库必须用这里的手机号，别自己编）】'
+    // 2026-10-22（用户 m01733）：把唯一命中的真名/联系人留给写卡用（面板上要显示公司名，不能只显示客户ID）
     const top = (d.unique && top0)
-      ? { id: String(top0.id || ''), name: String(top0.name || ''), contact: String(top0.contact || '') }
+      ? { id: String(top0.id || ''), name: String(top0.name || ''), contact: String(top0.contact || ''), phone: topPhone }
       : null
     // 2026-10-22（用户 m02366「都修」）：开场一律用库里的原文——
     //   AI 自己写的「开场」措辞飘（还问过「这些话术是调库生成的吗」）。唯一命中时由模板引擎出一句，
@@ -999,7 +1064,7 @@ export function apply(ctx, config = {}) {
         + (openLine
           ? '\n【开场原文（照这句说/照这句发：可以有删减，不许改写、不许另写）】\n' + openLine
           : ''),
-      kind: 'resolve', hit: cands.length, topId: String(d.topId || ''), unique: !!d.unique, top, openLine
+      kind: 'resolve', hit: cands.length, topId: String(d.topId || ''), topPhone, unique: !!d.unique, top, openLine
     }
   }
 
@@ -1011,18 +1076,29 @@ export function apply(ctx, config = {}) {
   //   用户以为写错了人（其实是同一个客户）。这里把**客户名/联系人**一并挂到 card.customer 上，
   //   面板统一渲染成「公司名（联系人）· 客户ID」。
   const custNameCache = new Map()
-  const custDisplayOf = async (id, pre) => {
-    const k = String(id || '').trim()
+  const custDisplayOf = async (target, pre) => {
+    const k = String(target || '').trim()
     if (!k) return null
-    if (pre && pre.top && String(pre.top.id || '') === k && String(pre.top.name || '').trim()) {
-      return { id: k, name: String(pre.top.name), contact: String(pre.top.contact || '') }
+    const isPh = /^1[3-9]\d{9}$/.test(k)
+    if (pre && pre.top) {
+      const sameId = !isPh && String(pre.top.id || '') === k
+      const samePhone = isPh && String(pre.top.phone || '') === k
+      if ((sameId || samePhone) && String(pre.top.name || '').trim()) {
+        return { phone: String(pre.top.phone || (isPh ? k : '')), name: String(pre.top.name), contact: String(pre.top.contact || '') }
+      }
     }
     if (custNameCache.has(k)) return custNameCache.get(k)
     let out = null
     try {
-      const r = await run('resolve', k)
-      const c = ((r && r.data && r.data.candidates) || [])[0]
-      if (c && String(c.id || '').trim() === k) out = { id: k, name: String(c.name || ''), contact: String(c.contact || '') }
+      if (isPh) {
+        const v = await run('view', { phone: k })
+        const pr = (v && v.data && v.data.found !== false) ? (v.data.profile || null) : null
+        if (pr && String(pr.name || '').trim()) out = { phone: k, name: String(pr.name || ''), contact: String(pr.contact || '') }
+      } else {
+        const r = await run('resolve', k)
+        const c = ((r && r.data && r.data.candidates) || [])[0]
+        if (c && String(c.id || '').trim() === k) out = { phone: String(c.phone || ''), name: String(c.name || ''), contact: String(c.contact || '') }
+      }
     } catch (e) { out = null }
     custNameCache.set(k, out)
     return out
@@ -1037,33 +1113,43 @@ export function apply(ctx, config = {}) {
       args[k] = (typeof v === 'string' && mk) ? mk.unmask(v) : v
     }
     out.args = args
+    // 2026-11-11（用户 m02149「客户识别以手机号码为标准，ID不要」）：
+    //   卡上认人只认手机号。模型可能把 ID 位写成手机号、或干脆只给公司名，这里统一挪正：
+    //   ① id 位是 11 位手机号 → 挪到 phone 位；② 还是没有 phone 但插件本地唯一认出了客户 → 补 pre.topPhone。
+    const phoneOf = (s) => (/^1[3-9]\d{9}$/.test(String(s || '').trim()) ? String(s).trim() : '')
+    if (!String(args.phone || '').trim()) {
+      const p2 = phoneOf(args.id) || String((pre && pre.topPhone) || '').trim()
+      if (p2) args.phone = p2
+    }
+    if (phoneOf(args.id)) delete args.id        // id 位是手机号：挪走，别让内部编号出现在卡上
+    const hasPhone = !!String(args.phone || '').trim()
     const hasId = !!String(args.id || '').trim()
     const errTxt = String(card.error || '')
-    const idProblem = !hasId || /客户ID/.test(errTxt)
-    if (!card.ok && idProblem && pre && pre.topId) {
-      if (card.action === 'settle') {
+    const targetProblem = !hasPhone || /手机号|客户ID|客户识别/.test(errTxt)
+    if (!card.ok && targetProblem && pre && String((pre && pre.topPhone) || '').trim()) {
+      if (card.action === 'settle' || String(args.what || '').trim()) {
         out.ok = true
         out.error = ''
-        out.repaired = '客户ID按消息线索补上：' + pre.topId
-      } else if (String(args.what || '').trim()) {
-        out.ok = true
-        out.error = ''
-        out.repaired = '客户ID按消息线索补上：' + pre.topId
+        out.repaired = '客户手机号按消息线索补上：' + pre.topPhone
+        args.phone = String(pre.topPhone).trim()
       }
-      if (out.ok) args.id = pre.topId
     }
-    if (out.ok !== false && String(args.id || '').trim()) {
+    if (out.ok !== false && String(args.phone || '').trim()) {
       try {
-        const c = await custDisplayOf(args.id, pre)
+        const c = await custDisplayOf(String(args.phone || '').trim(), pre)
         if (c && String(c.name || '').trim()) out.customer = c
       } catch (e) { /* noop：拿不到名字不影响写库 */ }
+    }
+    // 九要素进度：模型给不全很正常，卡上显示「已填 N/9」让人补；这里按修补后的 args 现算。
+    if (typeof dock.frameOfArgs === 'function') {
+      try { out.frame = dock.frameOfArgs(args) } catch (e) { /* noop */ }
     }
     // 2026-10-29（用户 m03421 截图：写卡「方式：会议」→ 点了「✅ 确认写入」才报「方式不合法: 会议」）：
     //   卡片必须在**生成时**就跑一遍写库预演（logplan / settleplan —— 与真写同一条 cmdLog/cmdSettle 路径，
     //   只跳过落盘）。预演过了才给「确认写入」按钮；底盘把「会议/面谈/演示」这类口语词归一了的，
     //   直接用归一后的 args 覆盖卡片（并把改动记进 fixed，面板上显示「✎ 插件替你改了…」）；
     //   预演过不了的，卡片退成红字说明（不给他一个注定失败的按钮）。
-    if (out.ok !== false && String(args.id || '').trim()) {
+    if (out.ok !== false && (String(args.phone || '').trim() || String(args.id || '').trim())) {
       try {
         const plan = await run(card.action === 'settle' ? 'settleplan' : 'logplan', args)
         const pd = (plan && plan.data) || {}
@@ -1220,7 +1306,7 @@ export function apply(ctx, config = {}) {
     let intent = { kind: '', why: '', score: { log: 0, advise: 0 } }
     try { intent = dock.classifyIntent(String(A.text || '')) } catch (e) { intent = { kind: '', why: '', score: { log: 0, advise: 0 } } }
     const intentNote = intent.kind === 'log'
-      ? '【这一轮你在录入跟进，不是在问策略】把这段跟进整理成写卡（action log）：id 用上面给的客户ID；method/type/what 从他的原话取（what 用他的原话精简，别加戏）；日期/反应/下一步/排期他没说就留空，不许编。别回策略、别给开场。'
+      ? '【这一轮你在录入跟进，不是在问策略】把这段跟进整理成写卡（action log）：phone 用上面给的手机号（不要客户ID）；method/type/what 从他的原话取（what 用他的原话精简，别加戏）；九要素里日期/反应/下一步/排期/阶段他没说就留空，不许编。别回策略、别给开场。'
       : intent.kind === 'advise'
         ? '【这一轮你在问「这个客户怎么跟」，不是录入】只给三样：判断（卡在哪、为什么）+ 下一步动作 + 开场原文（插件给了就照说）；不要出写卡，除非他明确说「记一条/落库」。'
         : ''
@@ -1292,7 +1378,7 @@ export function apply(ctx, config = {}) {
     //   模型答一堆"建议你这么说"，用户还得自己再教一遍「帮我记一条」。
     if (intent.kind === 'log' && !writeCards.length) {
       try {
-        const fb = dock.draftLogCard(String(A.text || ''), (pre && pre.topId) || dcid || '')
+        const fb = dock.draftLogCard(String(A.text || ''), { phone: String((pre && pre.topPhone) || (pre && pre.kind === 'phone' && pre.hit === 1 ? pre.queryPhone : '') || ''), id: String((pre && pre.topId) || dcid || '') })
         if (fb && fb.ok) writeCards.push(fb)
       } catch (e) { /* noop */ }
     }
@@ -1316,16 +1402,20 @@ export function apply(ctx, config = {}) {
   })
   const toolView = defineTool({
     name: 'sales_view',
-    description: 'AI-CRM客资管理系统-客户全景：查单个客户完整档案（基本信息+**最后登陆时间**+**智写智算使用情况**+跟进流水+联系人）。最后登陆与用量只作事实展示，不据此判定意向、不写进话术。可传客户ID、公司名或手机号关键字。',
-    parameters: { id: { type: 'string', description: '客户ID(如 C-未知-2608-020)或公司名/手机号关键字', required: true } },
+    description: 'AI-CRM客资管理系统-客户全景：查单个客户完整档案（基本信息+**客户档案**+**最后登陆时间**+**智写智算使用情况**+跟进流水+联系人）。最后登陆与用量只作事实展示，不据此判定意向、不写进话术。**客户识别以 11 位手机号为准，不要用客户ID**（客户ID 是内部主键，不对用户/模型暴露）。',
+    parameters: {
+      phone: { type: 'string', description: '客户手机号（11 位，1 开头）——识别客户以手机号为准' },
+      id: { type: 'string', description: '（兼容旧调用，正常不用）内部客户ID', },
+    },
     output: { schema: outSchema, render: textRender },
-    execute: async (args) => run('view', String(args.id || '').trim()),
+    execute: async (args) => run('view', { phone: String(args.phone || '').trim(), id: String(args.id || '').trim() }),
   })
   const toolLog = defineTool({
     name: 'sales_log',
     description: 'AI-CRM客资管理系统-记录跟进：把一次客户跟进写进**客户表**（客户表＝主表+流水表：先往流水表追加一条，再回写主表状态；数据写回 Excel）。每次跟进后必须调用。每次跟进都是为了把客户往 SOP 下一段推：有进展就显式传 stage 推进，回执里也会给 nextStage 提示下一段；确实没进展才不传（=停留）。',
     parameters: {
-      id: { type: 'string', description: '客户ID', required: true },
+      phone: { type: 'string', description: '客户手机号（11 位，1 开头）——识别客户以手机号为准', required: true },
+      id: { type: 'string', description: '（兼容旧调用，正常不用）内部客户ID' },
       method: { type: 'string', description: '方式: 电话/微信/上门/短信/合同/官网申请/其他' },
       type: { type: 'string', description: '类型: 首触/试用回访/高意向跟进/老客服务/客户反馈/策略调整/放弃跟进/数据整理' },
       stage: { type: 'string', description: 'SOP阶段(可选)：线索获取/客户触达/需求挖掘/产品演示/异议处理/方案报价/成交签约；出口(终态，客户到此有结论)：无法联系/推进终止；**归不进这些节点的写「其他跟进记录」**（阶段留空，看板归到「其他跟进记录」，主表当前阶段不动）。传了=把客户推进/回退到该阶段(显式优先)；不传=这次跟进落在客户当前阶段之下(停留)。口径：「线索获取」=线索进池还没跟；「客户触达」=第一次打通/加上微信——待首触客户的首次跟进、以及线索获取客户第一次用直接触达方式(电话/微信/上门/短信/合同)，都会自动落「客户触达」。注：旧名「预约演示」「价值传递」自动归一到「产品演示」，「触达」归一到「客户触达」' },
@@ -1340,7 +1430,6 @@ export function apply(ctx, config = {}) {
       level: { type: 'string', description: '客户等级变更(可选): SS/S/A/B/C；传 "-" 表示清空为未定级。**2026-10-13 起等级跟着分类走**——挂起冷备=C/待定跟进=B/重点跟进=A/标品成交=S/定制开发=SS/待首触=不定级：状态或阶段一变，写入口自动把等级归一到该分类的等级（以分类为准），回执里会说明这次归一了什么' },
       name: { type: 'string', description: '你给的人名/联系人(可选): 回写主表「姓名/联系人」，替换「匿名注册」等占位名' },
       company: { type: 'string', description: '公司名(可选): 回写主表「公司」' },
-      phone: { type: 'string', description: '手机号(可选): 11 位、1 开头。回写主表「手机」；若该号码已属别的客户会被拒绝(防重复手机)' },
       city: { type: 'string', description: '城市(可选): 回写主表「城市」' },
       wechat: { type: 'string', description: '微信昵称(可选): 回写主表「微信昵称」' },
       expire: { type: 'string', description: '到期时间(可选): YYYY-MM-DD(也接受 Excel 序列号，会自动归一)。回写主表「到期时间」' },
@@ -1385,9 +1474,12 @@ export function apply(ctx, config = {}) {
   const toolSop = defineTool({
     name: 'sales_sop',
     description: 'AI-CRM客资管理系统-客户SOP时间轴：把该客户的跟进记录按 SOP 阶段分组返回（线索获取→客户触达→需求挖掘→产品演示→异议处理→方案报价→成交签约，外加出口 无法联系/推进终止），归不进这些节点的记录单独放在 unlabeled（面板叫「其他跟进记录」），并给出当前阶段、结果与下一段。要"这个客户跟到哪一步了/完整 SOP"就用这个。',
-    parameters: { id: { type: 'string', description: '客户ID(如 C-未知-2608-020)或公司名/手机号关键字', required: true } },
+    parameters: {
+      phone: { type: 'string', description: '客户手机号（11 位）——识别客户以手机号为准' },
+      id: { type: 'string', description: '（兼容旧调用，正常不用）内部客户ID' },
+    },
     output: { schema: outSchema, render: textRender },
-    execute: async (args) => run('sop', String(args.id || '').trim()),
+    execute: async (args) => run('sop', { phone: String(args.phone || '').trim(), id: String(args.id || '').trim() }),
   })
   const toolSummary = defineTool({
     name: 'sales_summary',
@@ -1401,22 +1493,25 @@ export function apply(ctx, config = {}) {
   const toolNext = defineTool({
     name: 'sales_next',
     description: 'AI-CRM客资管理系统-客户作战卡：这个客户现在最该做的一件事、为什么是今天（带具体数字）、开口怎么说、打不通/说贵/说没需求怎么接。要"下一位客户我怎么跟"就用这个。',
-    parameters: { id: { type: 'string', description: '客户ID(如 C-未知-2608-020)或公司名/手机号关键字', required: true } },
+    parameters: {
+      phone: { type: 'string', description: '客户手机号（11 位）——识别客户以手机号为准' },
+      id: { type: 'string', description: '（兼容旧调用，正常不用）内部客户ID' },
+    },
     output: { schema: outSchema, render: textRender },
-    execute: async (args) => run('next', String(args.id || '').trim()),
+    execute: async (args) => run('next', { phone: String(args.phone || '').trim(), id: String(args.id || '').trim() }),
   })
   // 2026-10-09 通话中实时话术：客户刚说的话（本机转写文本）→ 现在该接哪句 + 这段透出的推进点
   const toolLive = defineTool({
     name: 'sales_live',
     description: 'AI-CRM客资管理系统-通话实时话术：电话开着外放时，把**客户刚说的话**（本机语音转写文本，最近几十秒）传进来，返回 1-3 条"你现在该接的那句"（按优先级排序，含为什么）+ 客户当前 SOP 阶段该拿到的结果 + 这段话透出的推进点。**2026-10-12 起升级**：规则版照旧先出（永远在），再补一段 `ai`（模型按现场语气改写的可念接话，硬超时 ' + Math.round(AI_TIMEOUT.live / 1000) + ' 秒（本机档与云端同档；整段文案 sales_clienttip 给 ' + Math.round(AI_TIMEOUT.clienttip / 1000) + ' 秒），失败/超时原样回落规则版；发模型的内容已做字段级脱敏、回来回填真名）。通话后要发微信/短信的整段文案用 sales_clienttip。',
     parameters: {
-      id: { type: 'string', description: '客户ID(如 C-未知-2608-020)或公司名/手机号关键字（可选：不传就只按话术库给应对）' },
+      phone: { type: 'string', description: '客户手机号（11 位）——识别客户以手机号为准（可选：不传就只按话术库给应对）' },
       text: { type: 'string', description: '客户刚说的话（本机转写文本，建议最近 60 秒）', required: true },
       limit: { type: 'number', description: '最多返回几条话术（默认 3，上限 5）' },
     },
     output: { schema: outSchema, render: textRender },
     execute: async (args) => {
-      const id = String((args && args.id) || '')
+      const id = String((args && (args.phone || args.id)) || '')
       const text = String((args && args.text) || '')
       const limit = clampInt(args && args.limit, 1, 5, 3)
       const r = await run('live', { id, text, limit })
@@ -1440,8 +1535,9 @@ export function apply(ctx, config = {}) {
     name: 'sales_settle',
     description: 'AI-CRM客资管理系统-给客户点名结论（每个客户都要有个结果）：你点名"这个客户沉默不搭理了/这一阶段先跟不动了/联系不上/不做了/成交了"，用这个落一条【结论】留痕并同步两表与状态（自动进结果层）。可单个（id）也可批量（ids，一批同一个结论+锚点，用来清黑洞）。锚点=复查时间或信号（沉默等需求/暂缓**必填**）；堵住"状态挂了却没说为什么"的黑洞。',
     parameters: {
-      id: { type: 'string', description: '客户ID(如 C-未知-2608-020)。单个点名必填；批量点名改用 ids' },
-      ids: { type: 'array', items: { type: 'string' }, description: '批量点名（可选）: 一串客户ID，同一个结论 + 同一个锚点；上限 50。用于清黑洞——你点名一批"这些先停住/联系不上"' },
+      phone: { type: 'string', description: '客户手机号（11 位）。单个点名用；批量点名改用 ids' },
+      id: { type: 'string', description: '（兼容旧调用，正常不用）内部客户ID' },
+      ids: { type: 'array', items: { type: 'string' }, description: '批量点名（可选）: 一串手机号（也兼容内部ID），同一个结论 + 同一个锚点；上限 50。用于清黑洞——你点名一批"这些先停住/联系不上"' },
       kind: { type: 'string', description: '结论: 沉默等需求(→挂起)/暂缓(→挂起冷备,停在当前段)/无法联系(→挂起冷备+出口)/推进终止(→已闭环+出口)/成交签约(→已闭环+成交)', required: true },
       anchor: { type: 'string', description: '复查锚点: 日期 YYYY-MM-DD 或一个信号(如"客户新项目立项"/"明年3月预算")。沉默等需求/暂缓必填——没有锚点的停住就是黑洞；三个终态结论可不填' },
       stuckAt: { type: 'string', description: '停在哪个 SOP 段(可选，默认取主表当前阶段): 线索获取/客户触达/需求挖掘/产品演示/异议处理/方案报价' },
@@ -1450,6 +1546,7 @@ export function apply(ctx, config = {}) {
     },
     output: { schema: outSchema, render: textRender },
     execute: async (args) => run('settle', {
+      phone: String(args.phone || '').trim(),
       id: String(args.id || '').trim(), kind: String(args.kind || '').trim(),
       ids: Array.isArray(args.ids) ? args.ids.map(x => String(x || '').trim()).filter(Boolean) : null,
       anchor: String(args.anchor || '').trim(), stuckAt: String(args.stuckAt || '').trim(),
@@ -1591,12 +1688,26 @@ export function apply(ctx, config = {}) {
     execute: async (args) => contractToolAct(run, args),
   })
 
+  // 2026-11-11（用户 m02105）：客户档案（区域一"客户/公司介绍"的数据源）——第 16 个工具。
+  //   手机号认客户；get 读、set 写、list 列、draft 给 AI 提炼用的空壳。档案是**人写人确认**的，不是跟进记录。
+  const toolProfile = defineTool({
+    name: 'sales_profile',
+    description: 'AI-CRM客资管理系统-客户档案：一个客户的"客户/公司介绍"——客户或公司是什么样、行业/规模/关键人/决策链/需求/对应产品/预算/竞品/合规要求/推进策略/资料来源。action=get 读档案（手机号认客户）、set 写档案（fields 里能写几项写几项，缺的留空不猜）、list 已建档案的客户、draft 出空壳给 AI 提炼。**档案不是跟进记录**；跟进/通话/报价照旧走 sales_log。**客户识别以 11 位手机号为准，不要传客户ID**。',
+    parameters: {
+      action: { type: 'string', description: 'get/set/list/draft（默认 get）' },
+      phone: { type: 'string', description: '客户手机号（11 位）——get/set/draft 必填' },
+      fields: { type: 'object', additionalProperties: true, description: 'set 用：档案字段键值，可写 intro/industry/scale/people/chain/need/product/budget/rival/compliance/strategy/source' },
+    },
+    output: { schema: outSchema, render: textRender },
+    execute: async (args) => run('profile', { action: String(args.action || 'get').trim(), phone: String(args.phone || '').trim(), fields: (args.fields && typeof args.fields === 'object') ? args.fields : {} }),
+  })
+
   const disposers = []
   // 2026-10-08 审计 B4：注册面自证——「工具/路由/闸到底挂上没有」原来只靠人眼，现在由 /sales/egress 回显，doctor 可断言。
   let toolsRegistered = 0
   let routeRegistered = false
   let routeWarn = ''
-  for (const tool of [toolTasks, toolView, toolLog, toolSop, toolSummary, toolNext, toolLive, toolPlan, toolSettle, toolBrief, toolEnterprise, toolFlywheel, toolCampaign, toolDigest, toolContract]) {
+  for (const tool of [toolTasks, toolView, toolLog, toolSop, toolSummary, toolNext, toolLive, toolPlan, toolSettle, toolBrief, toolEnterprise, toolFlywheel, toolCampaign, toolDigest, toolContract, toolProfile]) {
     try {
       disposers.push(ctx.tools.register(tool))
       toolsRegistered++
@@ -1753,7 +1864,9 @@ export function apply(ctx, config = {}) {
     logplan: 1, settleplan: 1,
     // 开源版（2026-11）：配置写入 / 建库 / 模型探活 —— 都有副作用（写配置文件、建目录表、花钱调模型）→ 只收 POST。
     //   demo 会真的往表里写 3 条示例客户（或清除它们）→ 同样只收 POST。
-    configset: 1, setup: 1, configtest: 1, demo: 1 }
+    configset: 1, setup: 1, configtest: 1, demo: 1,
+    // 1.3.0：客户档案（set 会写 客户档案.json）与单条归段（活动改流水表）→ 只收 POST。
+    profile: 1, stagefix: 1 }
   const HTTP_WRITE_INTENT = {
     settle: () => true,                                                   // cmdSettle 恒写两表
     enterprise: (a) => !!(a && a.facts),                                  // 带 facts = 台账留痕
@@ -2095,6 +2208,30 @@ export function apply(ctx, config = {}) {
           }
           // ---------- 2026-10-12 模型面（A′ 档）：人点按钮才调，只产文字、绝不写库 ----------
           case 'ai': {
+            // 2026-11-11（1.3.0）：客户档案提炼走 purpose=profile（看板「🧠 AI 提炼」按钮只传手机号）。
+            //   只出草稿文字、不落盘；模型不可用/超时 → mode:'none' + error，前端照旧显示原因。
+            const purposeIn = String((args && args.purpose) || '').trim()
+            if (purposeIn === 'profile') {
+              const ph = normPhoneLoose(args && args.phone)
+              const vv = await run('view', { phone: ph })
+              if (!vv || !vv.ok || !vv.data || !vv.data.found) {
+                result = { ok: false, error: '没找到这个手机号的客户' + (ph ? '（' + ph + '）' : '') + '：先确认号码，或先用 sales_log 建档。' }
+                break
+              }
+              const pg = await run('profile', { action: 'get', phone: ph })
+              const curProfile = (pg && pg.ok && pg.data && pg.data.profile) ? pg.data.profile : null
+              const ai = await aiProfileDraft(ctx, vv.data, curProfile)
+              result = {
+                ok: true,
+                data: {
+                  action: 'profile', mode: ai.ok ? 'ai' : 'none',
+                  text: ai.text || '', error: ai.error || '', label: ai.label,
+                  provider: ai.provider, model: ai.model, route: ai.route, local: !!ai.local,
+                  ms: ai.ms, rev: PLUGIN_REV,
+                },
+              }
+              break
+            }
             const action = String((args && args.action) || '').trim()
             if (!AI_ACTIONS[action]) {
               result = { ok: false, error: '未知 action：' + (action || '(空)') + '（本批开放：' + Object.keys(AI_ACTIONS).join(' / ') + '）' }
@@ -2374,6 +2511,29 @@ export function apply(ctx, config = {}) {
             if (!['seed', 'clean', 'info'].includes(mode)) { result = { ok: false, error: 'mode 只支持 seed / clean / info' }; break }
             const r = await run('demo', { mode })
             result = r.ok ? { ok: true, data: r.data } : r
+            break
+          }
+          // ---------- 1.3.0（2026-11-11 用户 m02105）：客户档案 + 单条流水归段 ----------
+          //   两个端点都**只收 POST**（profile set / stagefix 会写盘，读也走 POST：看板 fetch 本来就是 POST）。
+          case 'profile': {
+            const a = (args && typeof args === 'object') ? args : {}
+            const r = await run('profile', { action: String(a.action || 'get').trim(), phone: String(a.phone || '').trim(), id: String(a.id || '').trim(), fields: (a.fields && typeof a.fields === 'object') ? a.fields : {} })
+            const lib = (r && r.ok === true && r.data) ? r.data : r
+            if (!lib || lib.ok === false) { result = { ok: false, code: (lib && lib.code) || 'PROFILE_FAILED', error: (lib && lib.message) || (lib && lib.error) || '客户档案操作失败' }; break }
+            // 看板读取口径：get/set → data.profile / data.derived；list → data.profiles[]
+            if (lib.action === 'list') {
+              result = { ok: true, data: { action: 'list', count: lib.count, rev: lib.rev, profiles: lib.items || [], items: lib.items || [] } }
+            } else {
+              result = { ok: true, data: Object.assign({}, lib.data || {}, { action: lib.action, written: lib.written || [], draft: lib.draft || '' }) }
+            }
+            break
+          }
+          case 'stagefix': {
+            const a = (args && typeof args === 'object') ? args : {}
+            const r = await run('stagefix', { phone: String(a.phone || '').trim(), id: String(a.id || '').trim(), flowId: String(a.flowId || '').trim(), stage: String(a.stage || '').trim(), reason: String(a.reason || '').trim() })
+            const lib = (r && r.ok === true && r.data) ? r.data : r
+            if (!lib || lib.ok === false) { result = { ok: false, code: (lib && lib.code) || 'STAGEFIX_FAILED', error: (lib && lib.message) || (lib && lib.error) || '归段失败' }; break }
+            result = { ok: true, data: lib.data || {}, message: lib.message || '' }
             break
           }
           default: res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }); res.end(JSON.stringify({ ok: false, error: 'unknown method: ' + method })); return

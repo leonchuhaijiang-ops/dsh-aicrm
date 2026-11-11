@@ -57,7 +57,7 @@ const ctx = {
 const dispose = mod.apply(ctx, {})
 console.log('注册工具数:', tools.length, '| 路由:', route && route.path)
 ok(route && route.kind === 'prefix' && route.path === '/sales', '路由已注册 /sales')
-ok(tools.length === 15, '注册 15 个工具', tools.length)
+ok(tools.length === 16, '注册 16 个工具（含 sales_profile）', tools.length)
 
 // 3) 假 req/res
 async function call(method, url, body) {
@@ -215,6 +215,61 @@ if (toolLog && cid) {
   ok(!!(quote && quote.count >= 1), '补完后这条进了「方案报价」段，桶里少一条', { quote: quote && quote.count, cov: s2.sop && s2.sop.coverage })
   const au = runLib({ cmd: 'sopaudit', args: [{}] })
   ok(au.ok === true && au.totals && au.totals.ok === true && au.totals.badCount === 0, '全库审计：所有有记录的客户都归位（0 条丢）', au.totals)
+}
+
+
+console.log('\n[14] 1.3.0：手机号认客户 + 档案 + 归段 + AI 提炼')
+if (toolLog) {
+  // 另建一个客户，全程只用手机号定位（不出现客户ID）
+  const phoneB = '1' + '3900000000'
+  const addB = runLib({ cmd: 'add', args: [{ company: '测试客户B', name: '李工', phone: phoneB, level: 'B', status: '待首触', stage: '线索获取' }] })
+  ok(addB.ok === true, 'add 建客户B（手机号 ' + phoneB + '）', addB && (addB.message || addB.error))
+  const wB = await toolLog.execute({ phone: phoneB, date: '2026-11-11', type: '首触', method: '电话', what: '冒烟：按手机号记一笔，客户说下季度有预算', stage: '客户触达' })
+  const wBd = (wB && wB.data) || wB || {}
+  ok(wBd.ok === true, 'sales_log 只用 phone 就能写入（不需要客户ID）', wBd)
+  ok(!!(wBd.frame && wBd.frame.total === 9 && Array.isArray(wBd.frame.missing)), '回执带九要素 frame（缺项清单）', wBd.frame)
+  const toolView = tools.find((t) => t && t.name === 'sales_view')
+  const vB = await toolView.execute({ phone: phoneB })
+  const vBd = (vB && vB.data) || vB || {}
+  ok(vBd.found === true && vBd.profile && vBd.profile.phone === phoneB, 'sales_view 按手机号命中，回包带 phone', vBd && { found: vBd.found, phone: vBd.profile && vBd.profile.phone })
+  const flowId = (vBd.flow && vBd.flow[0] && vBd.flow[0].id) || ''
+  ok(!!flowId, 'view 的 flow 里带流水ID（归段用）', flowId)
+
+  // 客户档案：set → get/list
+  r = await call('POST', '/sales/profile', { action: 'set', phone: phoneB, fields: { intro: '做工程前期咨询，主要接政府可研', industry: '咨询公司', budget: '30万内' } })
+  ok(r.json && r.json.ok === true && r.json.data && r.json.data.profile && r.json.data.profile.intro.includes('政府可研'), 'profile set 写入档案', r.json && (r.json.error || r.json.data && r.json.data.action))
+  r = await call('POST', '/sales/profile', { action: 'get', phone: phoneB })
+  const pd = (r.json && r.json.data) || {}
+  ok(pd.profile && pd.profile.industry === '咨询公司' && pd.derived && pd.derived.company === '测试客户B', 'profile get 回档案+derived', { industry: pd.profile && pd.profile.industry, derived: pd.derived })
+  ok(pd.derived && pd.derived.name === '' && pd.derived.contact === '李工', 'derived.name 留空（避免「李工 / 李工」重复）', pd.derived)
+  r = await call('POST', '/sales/profile', { action: 'list' })
+  const pl = (r.json && r.json.data) || {}
+  ok(Array.isArray(pl.profiles) && pl.profiles.length >= 1 && pl.profiles.every((x) => x.phone && x.profile), 'profile list 回 profiles[{phone,profile,derived}]', pl && { n: pl.profiles && pl.profiles.length })
+
+  // 归段：把桶里的记录改到指定段
+  const wc = await toolLog.execute({ phone: phoneB, date: '2026-11-11', method: '微信', type: '客户反馈', what: '聊了聊行业，没谈到具体环节', stage: '其他跟进记录' })
+  const wcd = (wc && wc.data) || wc || {}
+  ok(wcd.ok === true && wcd.stageBucket === '其他跟进记录', '显式落桶（待归段）', wcd)
+  const toolSop14 = tools.find((t) => t && t.name === 'sales_sop')
+  const s14 = await toolSop14.execute({ phone: phoneB })
+  const s14d = (s14 && s14.data) || s14 || {}
+  const bucketId = (s14d.sop && s14d.sop.unlabeled && s14d.sop.unlabeled[0] && s14d.sop.unlabeled[0].id) || ''
+  ok(!!bucketId, 'SOP 的桶里能拿到待归段流水ID', bucketId)
+  if (bucketId) {
+    r = await call('POST', '/sales/stagefix', { phone: phoneB, flowId: bucketId, stage: '需求挖掘' })
+    ok(r.json && r.json.ok === true && r.json.data && r.json.data.changed === true && r.json.data.to === '需求挖掘', 'stagefix 把一条归到「需求挖掘」', r.json && (r.json.error || r.json.data))
+    const s15 = await toolSop14.execute({ phone: phoneB })
+    const s15d = (s15 && s15.data) || s15 || {}
+    const need = (s15d.sop && s15d.sop.stages || []).find((x) => x.stage === '需求挖掘')
+    ok(!!(need && need.count >= 1 && s15d.sop.coverage.ok === true), '归段后进对应环节，coverage 仍平', { need: need && need.count, cov: s15d.sop && s15d.sop.coverage })
+  }
+
+  // AI 提炼档案：只出文字，不落盘
+  r = await call('POST', '/sales/ai', { purpose: 'profile', phone: phoneB })
+  const ap = (r.json && r.json.data) || {}
+  ok(r.json && r.json.ok === true && ap.action === 'profile' && typeof ap.text === 'string', 'AI 提炼返回 text（不直接落盘）', { mode: ap.mode, textLen: (ap.text || '').length, error: ap.error })
+  r = await call('GET', '/sales/profile')
+  ok(r.code === 405, 'GET /sales/profile 被拒（写接口只收 POST）', r.code)
 }
 
 try { dispose && dispose() } catch (e) {}

@@ -42,13 +42,16 @@ const FILE_HINT_RE = /(这张表|那份表|这个表|那张表|上面|刚才|上
 export const DOCK_SYSTEM = [
   '你是你（一人公司老板，做工程前期咨询/可研/设计院生意）的销售助手，住在 sale 看板左侧。',
   '你的活：① 管理和录入跟进信息；② 回答客户、今天该跟谁、怎么跟。数据基础=客户表＝主表（客户ID/公司/联系人/手机/等级/状态/SOP阶段/下次跟进/备注）+流水表（日期/方式/类型/内容/反应/下一步），两张表合称「客户表」、是唯一数据基础；只说「客户表」，别叫「底表」、别说成只有主表。',
-  '【要数据】正文后给一个 ```json：{"calls":[{"tool":"sales_view","args":{"id":"C-..."}}]}，插件本地查完贴回：',
-  'sales_view(id) 档案+流水｜sales_search(q) 找客户｜sales_today() 今日任务｜sales_tasks() 任务池｜sales_brief() 简报｜sales_summary() 总览｜sales_cadence() 节奏｜sales_sop(q) 话术｜sales_contract_list() 合同。',
-  '查得到就用；查不到就照实说没有。你提到的人，插件已按手机号→客户ID→微信→公司全称→公司简称→联系人→原编号的顺序在本机认好，在【本次提到的客户】给ID——预查好，直接用，**不许再反问「是哪个客户」**、别再问是哪个；候选>1 且分不出才列ID问一句。',
+  '【要数据】正文后给一个 ```json：{"calls":[{"tool":"sales_view","args":{"phone":"<电话1>"}}]}，插件本地查完贴回：',
+  'sales_view(phone) 档案+流水｜sales_search(q) 找客户｜sales_today() 今日任务｜sales_tasks() 任务池｜sales_brief() 简报｜sales_summary() 总览｜sales_cadence() 节奏｜sales_sop(phone) 话术｜sales_contract_list() 合同。',
+  // 2026-11-11（用户 m02149「客户识别以手机号码为标准，ID不要」）：对外一律手机号。
+  //   提示词里不再出现客户ID；插件在本地按手机号认人，认不到才反问。
+  '客户一律用**手机号**认（11 位）：查档案、记跟进、点名结论都写 phone，不要写客户ID、也不要在回复里念客户ID。',
+  '查得到就用；查不到就照实说没有。你提到的人，插件已按手机号在本机认好，在【本次提到的客户】给手机号——预查好，直接用，**不许再反问「是哪个客户」**；同一手机号对上多个客户时才反问一句。',
   // 2026-10-22（用户 m02146「你要把跟进客户的电话展现出来」）：模型拿到的都是占位符（<电话1> 之类），
   //   提示词里没说过这回事 → 它以为真号被藏了，不敢写、绕开话题。占位符是可原样输出的，回填由插件做。
   '客户名/公司/手机/微信在本机已换成占位符（如 <电话1>、<单位2|咨询公司>）：要展示就**原样写占位符**，插件自动回填真名真号；看到占位符不许说「查不到/看不到」。',
-  '列「谁该打/跟谁」时每条**必带手机号**（没有就写「无手机号」）和客户ID；你要电话就逐个给全，不许省略。',
+  '列「谁该打/跟谁」时每条**必带手机号**（没有就写「无手机号」）；你要电话就逐个给全，不许省略。',
   '你发图时：先一句说清图里的关键信息（金额/日期/条目/方向），再回答他那句话；看不清就说看不清，别猜、别扯别的。',
   // 2026-10-22（用户 m02366「都修」）：开场一律用库里的原文，模型只许挑/删、不许改写（措辞别飘）。
   '要「开场/第一句话」时：插件给了【开场原文】就照那句说（可删客套、可截短），**不许改写、不许另写**；没给才按档案自己开口。',
@@ -58,8 +61,14 @@ export const DOCK_SYSTEM = [
   '先分清你在干嘛：贴的是「打了电话/客户说/聊了」→ 他在录入，直接整理成写卡；问「怎么跟/怎么说/下一步」→ 只给判断+下一步+开场，别出写卡。插件已判并贴【意图】，照它办，别自己改判。',
   '这是同一场持续对话（上文都在，文件插件会贴回）——绝不许说「我没收到文件」，别让你重发。',
   '【写库】只能这两种，插件出确认卡、你点确认才落：',
-  '{"action":"log","args":{"id":"C-...","method":"电话","type":"高意向跟进","what":"聊了什么","react":"反应","nextAction":"下一步","nextDate":"YYYY-MM-DD"}}',
-  '{"action":"settle","args":{"id":"C-...","kind":"沉默等需求|暂缓|无法联系|推进终止|成交签约","anchor":"日期或信号","stuckAt":"段位"}}',
+  '{"action":"log","args":{"phone":"<电话1>","method":"电话","type":"高意向跟进","what":"聊了什么","react":"反应","nextAction":"下一步","nextDate":"YYYY-MM-DD"}}',
+  '{"action":"settle","args":{"phone":"<电话1>","kind":"沉默等需求|暂缓|无法联系|推进终止|成交签约","anchor":"日期或信号","stuckAt":"段位"}}',
+  // 2026-11-11（用户 m02105/m02128）：跟进的**九要素**——记一笔在助手输入框完成，用户没说的一律留空，
+  //   确认卡会显示「已填 N/9」，人可以在卡上补；绝不替用户编日期/反应/下一步。
+  '一条跟进尽量凑齐九要素（缺的可以留空，卡上会显示「已填 N/9」让你补）：手机号、沟通内容(≥8字)、日期、方式、类型、阶段、对方反应、下一步动作、下次跟进时间。',
+  '用户没说的要素**一律留空**，不许猜日期、猜反应、猜下一步；只把他说过的、以及插件贴给你的事实写进卡里。what 用他的原话概括，别加工成汇报腔。',
+  // 2026-11-11（用户 m02105②「面板不要显示我给出命令的过程」）：看板只留结论与卡，过程别复述。
+  '看板只显示你的结论和确认卡：**不要复述你的检索步骤、工具调用、JSON、命令过程**，也不要说「我先查一下」；查完直接给结论。',
   '类型只能是 首触/试用回访/高意向跟进/老客服务/客户反馈/策略调整/放弃跟进/数据整理；状态是 跟进中/挂起/重点跟进/挂起冷备/已闭环/待首触；阶段是 SOP 段。三者别混：类型是这一次干了什么，状态是客户现在停在哪，阶段是走到 SOP 哪一段。',
   // 2026-10-29（用户 m03421：写卡「方式：会议」→ 点确认才报「方式不合法」）：方式枚举要写在提示词里，
   //   别让模型到了写库才被拒；口语词插件会自动归一（会议→上门、视频会议→电话），但它最好一次写对。
@@ -69,7 +78,7 @@ export const DOCK_SYSTEM = [
   'stage 一般别传：插件按 what 判这一段（演示→产品演示、报价→方案报价、签约→成交签约）；只有你确定该落到某段时才写 stage。',
   '写一次客户表=回写主表状态+追加一条流水（客户表的两张表永远一致，由插件一个写入口保证）；不确定的字段别写。终态（挂起/挂起冷备/已闭环）要有结论或锚点，否则会拒——拒了就是没写，照实说。一条回答最多 2 张写卡。',
   '【只有两种情况才反问】正文后给：{"action":"ask","args":{"q":"…","options":["A","B"],"why":"为什么问"}}（2~4 个可点选项）',
-  '一是真有疑问：插件没给客户ID、自己也查不到、要写库却缺 ID/结论/锚点、和上一轮明确指令冲突。',
+  '一是真有疑问：插件没给手机号、自己也查不到、要写库却缺手机号/结论/锚点、和上一轮明确指令冲突。',
   '二是重大决策：一次要动多个客户、清排期/归档/作废这类不可逆的事、要重新激活挂起冷备或主动跟进已闭环、要花大钱的批量活。',
   '其余一律自己查、自己判断、先给结论——**可查的东西不许反问，信息够就不许反问**；普通单条跟进直接出确认卡。',
   '【口径】挂起冷备/已闭环不主动催（2026-10-19）；不承诺效果、不编案例数据；引政策要说文号与版本，不确定标「待核实」。中文短句，先结论后理由。',
@@ -79,16 +88,16 @@ export const DOCK_SYSTEM = [
 //   写成"文字 JSON 协议"而不是 provider 原生 tool-calling（跨模型一致，不依赖适配器能力）。
 //   write:true 的工具**永远不由循环执行**：只产出 confirmation 卡（先跑 logplan/settleplan 出预览）。
 export const DOCK_TOOLS = [
-  { name: 'sales_view', desc: '客户档案 + 流水 + SOP', write: false, cmd: 'view', arg: (a) => String((a && a.id) || '') },
+  { name: 'sales_view', desc: '客户档案 + 流水 + SOP（给 11 位手机号）', write: false, cmd: 'view', arg: (a) => String((a && (a.phone || a.id)) || '') },
   { name: 'sales_search', desc: '按姓名/公司/手机/微信找客户', write: false, cmd: 'search', arg: (a) => String((a && (a.q || a.kw)) || '') },
   { name: 'sales_today', desc: '今日任务队列（必打/首触/该打）', write: false, cmd: 'plan', arg: () => null },
   { name: 'sales_tasks', desc: '任务池（逾期/临期/未排期/待定）', write: false, cmd: 'tasks', arg: () => null },
   { name: 'sales_brief', desc: '今日简报（盘点+异常+优先级）', write: false, cmd: 'brief', arg: () => null },
   { name: 'sales_summary', desc: '总览（客户/流水/分类/触达）', write: false, cmd: 'summary', arg: () => null },
   { name: 'sales_cadence', desc: '四类跟进节奏到点清单', write: false, cmd: 'cadence', arg: () => null },
-  { name: 'sales_sop', desc: '某客户的 SOP 进度与话术（给客户ID/姓名/公司/手机）', write: false, cmd: 'sop', arg: (a) => String((a && (a.q || a.query || a.id)) || '') },
+  { name: 'sales_sop', desc: '某客户的 SOP 进度与话术（给 11 位手机号）', write: false, cmd: 'sop', arg: (a) => String((a && (a.phone || a.id || a.q || a.query)) || '') },
   { name: 'sales_contract_list', desc: '合同台账清单', write: false, cmd: 'contract', arg: () => ({ action: 'list' }) },
-  { name: 'sales_log', desc: '记一条跟进（须确认；先用 logplan 出预览）', write: true, planCmd: 'logplan', writeCmd: 'log' },
+  { name: 'sales_log', desc: '记一条跟进（须确认；先用 logplan 出预览；九要素：phone/what/date/method/type/stage/react/nextAction/nextDate）', write: true, planCmd: 'logplan', writeCmd: 'log' },
   { name: 'sales_settle', desc: '点名结论/转终态（须确认；先用 settleplan 出预览）', write: true, planCmd: 'settleplan', writeCmd: 'settle' },
 ]
 export function dockToolByName(name) {
@@ -178,9 +187,12 @@ const INTENT_TYPE_RULES = [
   [/首触|第一次联系|第一次打/, '首触'],
   [/不跟|放弃|不做了|没需求了/, '放弃跟进'],
 ]
-export function draftLogCard(text, id) {
-  const cid = String(id || '').trim()
-  if (!/^C-/.test(cid)) return null
+// target 可以是旧式「客户ID 字符串」，也可以是 { phone, id }（1.3.0 起优先手机号）。
+export function draftLogCard(text, target) {
+  const t = (target && typeof target === 'object') ? target : { id: String(target || '') }
+  const phone = String(t.phone || '').trim()
+  const cid = String(t.id || '').trim()
+  if (!phone && !/^C-/.test(cid)) return null
   let s = String(text == null ? '' : text)
   // 去掉开头那句"帮我记/记一条"，以及手机号/客户ID（那是定位用的，不该写进沟通内容）
   s = s.replace(/^[，,。.\s]*(帮我记一条|帮我记下|帮我记|记一条|记一下|补一条|记录一下|录入一下|写一条)[：:，,。.\s]*/, '')
@@ -189,14 +201,17 @@ export function draftLogCard(text, id) {
   if (s.length < 6) return null
   const m = s.match(INTENT_METHOD_RE)
   let type = '高意向跟进'
-  for (const [re, t] of INTENT_TYPE_RULES) { if (re.test(s)) { type = t; break } }
+  for (const [re, t2] of INTENT_TYPE_RULES) { if (re.test(s)) { type = t2; break } }
+  const args = { method: m ? m[1] : '', type, what: s.slice(0, 300) }
+  if (phone) args.phone = phone; else args.id = cid
   return {
     ok: true,
     action: 'log',
-    args: { id: cid, method: m ? m[1] : '', type, what: s.slice(0, 300) },
+    args,
     fixed: [],
+    frame: frameOfArgs(args),
     draftFrom: 'intent',
-    note: '（插件按「录入跟进」把这段话整理成了一行，日期/反应/下一步他没说就留空；确认前可以改）',
+    note: '（插件按「录入跟进」把这段话整理成了一行：没说日期/反应/下一步就留空，卡上可以补；确认前改也行）',
   }
 }
 
@@ -425,13 +440,32 @@ const SETTLE_KINDS = ['沉默等需求', '暂缓', '无法联系', '推进终止
 const MAX_CALLS_PER_TURN = 3
 const MAX_WRITE_CARDS = 2
 
+// 2026-11-11（1.3.0，用户 m02105/m02128/m02149）：
+//   ① 确认卡一律带 phone（客户识别以手机号为准；id 只留内部兼容，不在面板/提示词出现）；
+//   ② 卡上带 frame（九要素已填/缺项）→ 面板显示「已填 N/9」，人可以在卡里补齐；
+//   ③ phone/what 缺了照样拒绝（写空卡没意义），其餘要素缺了**只提示不拦**（软框架）。
+const FRAME_KEYS = ['phone', 'what', 'date', 'method', 'type', 'stage', 'react', 'nextAction', 'nextDate']
+export function frameOfArgs(input) {
+  const a = (input && typeof input === 'object') ? input : {}
+  const filled = []
+  const missing = []
+  for (const k of FRAME_KEYS) {
+    const v = String(a[k] == null ? '' : a[k]).trim()
+    if (v) filled.push(k); else missing.push(k)
+  }
+  return { filled, missing, total: FRAME_KEYS.length, n: filled.length }
+}
+function isPhone11(s) { return /^1[3-9]\d{9}$/.test(String(s || '').trim()) }
 function buildLogCard(rawArgs) {
   const args = {}
   for (const k of LOG_ARG_KEYS) {
     if (rawArgs[k] !== undefined && rawArgs[k] !== null && String(rawArgs[k]).trim() !== '') args[k] = rawArgs[k]
   }
-  if (!String(args.id || '').trim()) return { ok: false, action: 'log', error: '模型给的确认卡没有客户ID，不能写库' }
-  if (!/^C-/.test(String(args.id).trim())) return { ok: false, action: 'log', error: '客户ID格式不对（应以 C- 开头）：' + args.id }
+  const phone = String(args.phone || '').trim()
+  const cid = String(args.id || '').trim()
+  if (!phone && !cid) return { ok: false, action: 'log', error: '模型给的确认卡没有客户手机号（客户识别以手机号为准），不能写库' }
+  if (phone && !isPhone11(phone)) return { ok: false, action: 'log', error: '手机号不是 11 位（应以 1 开头）：' + phone }
+  if (cid && !/^C-/.test(cid)) return { ok: false, action: 'log', error: '内部客户编号格式不对（应以 C- 开头）：' + cid }
   if (!String(args.what || '').trim()) return { ok: false, action: 'log', error: '确认卡里没有「沟通内容」(what)，不写空跟进' }
   if (!String(args.method || '').trim()) args.method = '其他'
   // 2026-10-21 夜（m05977）：类型/状态/阶段互相写错是模型的常见病，先归一再用；
@@ -439,16 +473,24 @@ function buildLogCard(rawArgs) {
   const nr = normalizeLogArgs(args)
   const fixedArgs = nr.args
   if (!String(fixedArgs.type || '').trim()) fixedArgs.type = '高意向跟进'
-  return { ok: true, action: 'log', args: fixedArgs, fixed: nr.fixed }
+  return { ok: true, action: 'log', args: fixedArgs, fixed: nr.fixed, frame: frameOfArgs(fixedArgs) }
 }
 
 function buildSettleCard(rawArgs) {
   const args = {}
-  for (const k of ['id', 'kind', 'anchor', 'stuckAt', 'note', 'date']) {
+  for (const k of ['id', 'phone', 'kind', 'anchor', 'stuckAt', 'note', 'date', 'ids']) {
+    if (k === 'ids') {
+      if (Array.isArray(rawArgs.ids) && rawArgs.ids.length) args.ids = rawArgs.ids.slice(0, 50)
+      continue
+    }
     if (rawArgs[k] !== undefined && rawArgs[k] !== null && String(rawArgs[k]).trim() !== '') args[k] = rawArgs[k]
   }
-  if (!String(args.id || '').trim()) return { ok: false, action: 'settle', error: '结论卡没有客户ID，不能写库' }
-  if (!/^C-/.test(String(args.id).trim())) return { ok: false, action: 'settle', error: '客户ID格式不对（应以 C- 开头）：' + args.id }
+  const phone = String(args.phone || '').trim()
+  const cid = String(args.id || '').trim()
+  const batch = Array.isArray(args.ids) && args.ids.length > 0
+  if (!phone && !cid && !batch) return { ok: false, action: 'settle', error: '结论卡没有客户手机号（客户识别以手机号为准），不能写库' }
+  if (phone && !isPhone11(phone)) return { ok: false, action: 'settle', error: '手机号不是 11 位（应以 1 开头）：' + phone }
+  if (cid && !/^C-/.test(cid)) return { ok: false, action: 'settle', error: '内部客户编号格式不对（应以 C- 开头）：' + cid }
   const kind = String(args.kind || '').trim()
   if (SETTLE_KINDS.indexOf(kind) < 0) return { ok: false, action: 'settle', error: '结论只能是 ' + SETTLE_KINDS.join('/') + '，收到：' + (kind || '(空)') }
   return { ok: true, action: 'settle', args }
@@ -551,7 +593,10 @@ export function parseAction(text) {
   if (b.writeCards.length) return b.writeCards[0]
   if (b.calls.length) {
     const c = b.calls[0]
-    if (c.tool === 'sales_view') return { ok: true, action: 'lookup', args: { id: String(c.args.id || '') } }
+    if (c.tool === 'sales_view') {
+      const v = String(c.args.phone || c.args.id || '')
+      return v ? { ok: true, action: 'lookup', args: { phone: v, id: v } } : null
+    }
     if (c.tool === 'sales_search') return { ok: true, action: 'search', args: { q: String(c.args.q || '') } }
     return { ok: true, action: 'tool', tool: c.tool, args: c.args }
   }

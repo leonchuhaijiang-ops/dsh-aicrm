@@ -8,6 +8,7 @@
 //   两者对不上 = 有记录被吞了（bug），直接列出客户 ID。
 //   顺带列出「有记录、但主表当前阶段为空」的客户——这类客户补一次带 stage 的
 //   跟进即可把当前阶段推上去，不算丢数据。
+//   1.3.0 起另外给出：待归段记录数、待归段客户 Top10（按桶条数）、未进漏斗客户数+示例。
 //
 // 口径（与看板 SOP 面板、sales_sop 工具完全一致，都走 lib 的 buildSop）：
 //   · 【信息变更】/【删除】墓碑是过程留痕，不进 SOP，单独计 changes；
@@ -103,28 +104,41 @@ function main() {
     console.error(`[错误] 数据目录不存在：${dir}（来源：${source}）`)
     return 2
   }
-  const r = callLib(dir, { cmd: 'sopaudit', args: [{ mode: onlyProblems ? 'problems' : '' }] })
+  const r = callLib(dir, { cmd: 'sopaudit', args: [{}] })
   if (!r.data || !r.data.ok) {
     console.error('[错误] 审计失败：' + ((r.data && r.data.message) || r.stderr || '未知错误'))
     return 2
   }
   const j = r.data
-  if (asJson) { console.log(JSON.stringify(j, null, 1)); return j.totals.ok ? 0 : 1 }
   const t = j.totals || {}
+  const customers = Array.isArray(j.customers) ? j.customers : []
+  const bucket = customers.filter(c => c.unlabeled > 0).sort((a, b) => (b.unlabeled - a.unlabeled) || (b.follows - a.follows))
+  const noCurrent = customers.filter(c => c.noCurrent)
+  // 1.3.0 新增视图：待归段（其他跟进记录桶）与「有记录但主表阶段为空」的客户
+  const view = {
+    unlabeledTotal: t.unlabeled || 0,
+    unlabeledCustomers: bucket.length,
+    unlabeledTop: bucket.slice(0, 10).map(c => ({ id: c.id, name: c.name, follows: c.follows, staged: c.staged, unlabeled: c.unlabeled })),
+    noCurrentCount: typeof t.noCurrentCount === 'number' ? t.noCurrentCount : noCurrent.length,
+    noCurrentTop: noCurrent.slice(0, 10).map(c => ({ id: c.id, name: c.name, follows: c.follows, currentStage: c.currentStage || '' })),
+  }
+  if (asJson) { console.log(JSON.stringify(Object.assign({}, j, view), null, 1)); return t.ok ? 0 : 1 }
   console.log('数据目录：' + j.dataDir + '（' + source + '）')
   console.log(`口径：有跟进记录的客户 ${t.customersWithRecords} 个（另有 ${t.changeOnlyCustomers} 个客户只有【信息变更】留痕、无跟进结果）`)
   console.log(`记录：跟进 ${t.follows} 条 = 段内 ${t.staged} + 其他跟进记录 ${t.unlabeled}（变更留痕 ${t.changes} 条另计）`)
+  console.log(`[待归段] ${view.unlabeledTotal} 条记录没有阶段（阶段为空或认不出，进「其他跟进记录」桶；分布在 ${view.unlabeledCustomers} 个客户）`)
   console.log(t.ok
     ? '[结果] 全部有归宿：没有记录被吞，也没有记录挂在不存在的客户上 ✓'
     : `[结果] 有 ${t.badCount} 个客户的记录数对不上（见下）✗`)
-  if (t.noCurrentCount) console.log(`[注意] ${t.noCurrentCount} 个客户有记录但主表当前阶段为空：补一次带 stage 的跟进即可把当前阶段推上去（不算丢数据）`)
+  console.log(`[未进漏斗] 有跟进记录但主表当前阶段为空的客户 ${view.noCurrentCount} 个` +
+    (noCurrent.length ? `（示例：${noCurrent.slice(0, 5).map(c => String(c.name || c.id).slice(0, 16)).join('、')}）` : '') +
+    '：补一次带 stage 的跟进即可把当前阶段推上去（不算丢数据）')
   if (!t.ok && j.bad.length) {
     console.log('\n对不上的客户：')
     for (const c of j.bad) console.log(`  ${c.id}  ${c.name}  跟进${c.follows} 段内${c.staged} 桶${c.unlabeled}`)
   }
-  const bucket = (j.customers || []).filter(c => c.unlabeled > 0).sort((a, b) => b.unlabeled - a.unlabeled)
   if (!onlyProblems && bucket.length) {
-    console.log(`\n有「其他跟进记录」的客户 ${bucket.length} 个，桶最多的前 10 个：`)
+    console.log(`\n待归段客户 Top${Math.min(10, bucket.length)}（按「其他跟进记录」桶条数）：`)
     for (const c of bucket.slice(0, 10)) console.log(`  ${c.id}  ${String(c.name || '').slice(0, 22)}  跟进${c.follows} 段内${c.staged} 桶${c.unlabeled}`)
     console.log('  （想让它们进段：补一条带 stage 的跟进；历史记录不会硬猜阶段，详见 docs/tools.md）')
   }

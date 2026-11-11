@@ -9,7 +9,7 @@ dsh-sales/
 ├── cordis.patch.yml          # bundle 声明：往宿主里 insert 一个 id=sales 的组合单元
 ├── package.json              # dsh.bundle.patch / dsh.client 两个注册点
 ├── dsh/
-│   ├── index.js              # 【宿主半】15 个模型工具 + /sales/* 路由 + AI 编排
+│   ├── index.js              # 【宿主半】16 个模型工具 + /sales/* 路由 + AI 编排
 │   ├── ai.js                 # 唯一的模型出口（llm.stream）
 │   ├── config.js             # 配置解析：SALE_DIR > 配置文件 > 默认目录
 │   ├── rag.js                # 本地词法检索（营销资料库）
@@ -37,7 +37,7 @@ dsh-sales/
 
 启动时做四件事：
 
-1. `defineTool` 注册 15 个模型工具（见 [docs/tools.md](./tools.md)）；
+1. `defineTool` 注册 16 个模型工具（见 [docs/tools.md](./tools.md)）；
 2. 注册 `/sales/*` HTTP 前缀路由，给看板读配置、初始化目录、点按钮调模型；
 3. 注入 `llm` 服务句柄（可选：宿主没装模型服务，插件也必须照常跑）；
 4. 把 `egress-guard` 挂到工具调用之前。
@@ -74,15 +74,18 @@ node lib/sales-lib.js <cmd> [json] --dir <数据目录>
 ## 4. 一次「记跟进」的完整路径
 
 ```text
-模型调用 sales_log(args)
-  → index.js 校验/归一参数（nextDate 三态、level 哨兵 "-"）
+你在 AI 助手输入框说一句话
+  → 助手按九要素抽字段 → 可编辑确认卡（卡头「已填 N/9」）
+  → 你确认（args = 卡上改后的值）
+  → 模型调用 sales_log(args)
+  → index.js 校验/归一参数（按 11 位手机号定位客户；nextDate 三态、level 哨兵 "-"）
   → egress-guard 检查（本例不出网，直接放行）
   → 子进程 node lib/sales-lib.js log '<json>' --dir <dir>
        → 拿 .sales-lock
        → 读流水表 + 主表（sheet_to_json，defval:''）
        → 追加一行流水、回写主表状态/排期/等级
        → 表头断言 → 原子写两张表 → 释放锁 → 写变更留痕
-  → 回执给模型（含 nextStage 提示）
+  → 回执给助手（含 nextStage 提示；只显示手机号，不显示内部客户ID）
 ```
 
 `nextDate` 的三态（写日期 / 清空 / 不动原排期）在 `index.js` 里显式构造：**没传就不带这个键**，让数据层能区分「未提供」和「显式清空」。这是被真实事故打出来的补丁 —— 早期实现恒传空串，导致每次不带日期的跟进都会静默抹掉排期。
@@ -109,10 +112,12 @@ node lib/sales-lib.js <cmd> [json] --dir <数据目录>
 | `setup` | 建目录 + 空表 + 示例语料 | 否（只建空表） |
 | `configtest` | 真发一次极短模型请求 | 否 |
 | `plan` / `tasks` / `view` / `sop` / `next` / `brief` / `digest` / `summary` / `flywheel` / `enterprise` / `campaign` / `live` / `clienttip` | 派生视图 | 否 |
+| `profile` | 客户档案读写（`action=get\|set\|list\|draft`） | 否（写的是 `客户档案.json`） |
+| `stagefix` | 给一条「其他跟进记录」归段 | **是**（只改这条流水的「阶段」，不新建、不动主表当前阶段） |
 | `contract` | 合同台账读 | 否 |
-| `ai` | 看板按钮按需调模型（`action=live\|clienttip\|next\|brief\|digest\|contract`） | 否 |
+| `ai` | 看板按钮按需调模型（`action=live\|clienttip\|next\|brief\|digest\|contract`；`purpose=profile` 提炼档案） | 否 |
 
-**HTTP 面恒只读客户表**：请求里带写意图（写 `settle`、带 `facts`、带 `by`+`to` 这类）一律 **403**。写操作只能通过模型工具，经 `ctx.tools.guard` 那层护栏。这是刻意的不对称：页面只负责展示与触发 AI，落库必须经过可审计的工具入口。
+**HTTP 面原则上不写客户表**：请求里带写意图（写 `settle`、带 `facts`、带 `by`+`to` 这类）一律 **403**；写操作只能通过模型工具，经 `ctx.tools.guard` 那层护栏。唯一例外是归段 `stagefix`——它只修正已有流水的一条「阶段」标注（必须带 `phone` + `flowId`，不能新建记录），是看板上的显式人工操作。这是刻意的不对称：页面负责展示与触发 AI，落库以可审计的工具入口为准。
 
 ## 7. 合同生成
 

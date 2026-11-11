@@ -19,6 +19,8 @@
 //   ⑭ 仓库 templates/营销资料库/ 示例语料完整（3 篇 md + 结构化 json）
 //   ⑮ lib/sales-lib.js 语法检查通过（node --check）
 //   ⑯ 数据层冒烟：临时目录里跑 node lib/sales-lib.js init + check，均退出 0
+//   ⑰ 手机号唯一性与覆盖率（1.3.0 起手机号是客户识别主键）：有效号计数、
+//      无手机号数（不算失败，给示例公司）、重复号（失败，给号码 + 公司名）
 //
 // 数据目录解析优先级与 setup.mjs / dsh/config.js 一致：
 //   --data-dir 参数 > 环境变量 SALE_DIR > 配置档 dataDir > 默认 <home>/dsh-sales-data
@@ -382,6 +384,61 @@ function main() {
     fail('数据层冒烟失败（临时目录 init + check）', String((e && e.message) || e), '确认系统临时目录可写')
   } finally {
     if (smokeDir) { try { fs.rmSync(smokeDir, { recursive: true, force: true }) } catch (e) { /* noop */ } }
+  }
+
+  // ⑰ 手机号唯一性与覆盖率（只读）
+  //   1.3.0 起客户识别改成 11 位手机号（客户ID 只是内部主键）：重复号会让写库张冠李戴，
+  //   所以重复号算失败；没有手机号只是覆盖率问题（历史客户/只有微信的线索），不算失败。
+  const PHONE_RE = /^1[3-9]\d{9}$/
+  if (!masterExists) {
+    fail('手机号唯一性与覆盖率', '主表不存在，跳过', '先修好上面的「主表存在」一项')
+  } else if (!X) {
+    fail('手机号唯一性与覆盖率', 'xlsx 不可用，跳过', '在仓库根目录跑 npm install')
+  } else {
+    try {
+      const wb = X.readFile(masterPath)
+      const sh = wb.Sheets['客户主表']
+      if (!sh) {
+        fail('手机号唯一性与覆盖率', '主表里没有 sheet「客户主表」，跳过', '用 Excel 检查工作表名，别重命名 sheet')
+      } else {
+        const rows = X.utils.sheet_to_json(sh, { defval: '' })
+        const byPhone = new Map()
+        const blankNames = []
+        let blanks = 0
+        for (const r of rows) {
+          const raw = r['手机']
+          const phone = String(raw == null ? '' : raw).replace(/[\s-]/g, '')
+          const name = String(r['公司'] || r['姓名/联系人'] || r['客户ID'] || '').trim()
+          if (!PHONE_RE.test(phone)) {
+            blanks++
+            if (name && blankNames.length < 5) blankNames.push(name)
+            continue
+          }
+          if (!byPhone.has(phone)) byPhone.set(phone, [])
+          byPhone.get(phone).push(name || '(无名)')
+        }
+        let valid = 0
+        for (const ns of byPhone.values()) valid += ns.length
+        const dups = [...byPhone.entries()].filter(([, ns]) => ns.length > 1)
+        const blankNote = blanks
+          ? `无手机号 ${blanks} 个（示例：${blankNames.join('、') || '（未填公司名）'}）`
+          : '无手机号 0 个'
+        const coverage = rows.length ? Math.round((valid / rows.length) * 1000) / 10 : 0
+        if (dups.length) {
+          const shown = dups.slice(0, 10)
+            .map(([p, ns]) => `${p}（${ns.join(' / ')}）`)
+            .join('；')
+          fail('手机号唯一性与覆盖率',
+            `重复手机号 ${dups.length} 个｜${shown}${dups.length > 10 ? '…' : ''}｜共 ${rows.length} 个客户，有效号 ${valid} 个（覆盖 ${coverage}%），${blankNote}`,
+            '每个客户一个手机号：把重复的号码改成正确客户，或把非本人的号清空（客户ID 才是内部主键）')
+        } else {
+          pass('手机号唯一性与覆盖率',
+            `${rows.length} 个客户｜有效手机号 ${valid} 个（覆盖 ${coverage}%）｜无重复｜${blankNote}`)
+        }
+      }
+    } catch (e) {
+      fail('手机号唯一性与覆盖率', '读主表失败：' + String((e && e.message) || e), '确认文件是有效的 .xlsx（没被占用/损坏）')
+    }
   }
 
   // ----- 打印 -----

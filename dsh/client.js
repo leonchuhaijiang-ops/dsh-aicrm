@@ -573,6 +573,29 @@ function apply(ctx) {
         const SRC_LABEL = { env: '环境变量 SALE_DIR（优先）', config: '配置文件', default: '未设置（用的是默认值）' }
         const TONE = { ok: 'var(--ok-color, #2b8a3e)', err: 'var(--danger-color, #c92a2a)', info: 'var(--text-2, #888)' }
 
+        // ===== 2026-11-11（1.3.0）：手机号认客户 + 客户档案卡 + SOP 归段 =====
+        // 契约（后端 dsh/index.js 已实现，前端只消费）：
+        //   /sales/profile {action:'get'|'set'|'list'|'draft', phone?, fields?} → {ok,data}
+        //     get → {phone, profile:{intro,industry,scale,people,chain,need,product,budget,rival,compliance,strategy}|null,
+        //            derived:{name,contact,city,source,level,stage}}
+        //   /sales/stagefix {phone, flowId, stage, reason?} → {ok,data:{from,to}}
+        //   /sales/ai {purpose:'profile', phone} → {ok,data:{text}}（只出文字，必须点保存才落盘）
+        // 口径：跟进记录只在 SOP 展示（区域一不再堆 c.hist）；客户标识一律手机号（不出现 C- 客户ID）。
+        const [profiles, setProfiles] = useState({})      // phone → {profile, derived}
+        const [profEdit, setProfEdit] = useState(null)    // 档案编辑面板 {phone,name,fields,busy,msg,aiBusy,loading}
+        const [stageBusy, setStageBusy] = useState('')    // `${phone}|${flowId}` 正在归段
+        const [stageMsg, setStageMsg] = useState(null)    // 归段回执 {tone,text}
+        const SOP_STAGES_13 = ['线索获取', '客户触达', '需求挖掘', '产品演示', '异议处理', '方案报价', '成交签约',
+          '企业级机会', '决策链摸排', '需求与现状勘察', '方案与试点设计', '商务推进', '私有化签约']
+        const SOP_STAGE_FIX = SOP_STAGES_13.concat(['无法联系', '推进终止', '其他跟进记录'])
+        const PROFILE_FIELDS_UI = [
+          ['intro', '一句话介绍（这家公司/这个客户是什么情况）'],
+          ['industry', '行业'], ['scale', '规模'],
+          ['people', '决策人'], ['chain', '决策链'],
+          ['need', '需求'], ['product', '产品'], ['budget', '预算'],
+          ['rival', '竞对'], ['compliance', '合规要求'], ['strategy', '打法策略'],
+        ]
+
         // 静默刷新（不置 loading，数据变了自动跟上）
         // 2026-09-29 修（用户报障「重点跟进未显示黄江」）：原来只刷 tasks/summary/firstcall，
         //   「重点跟进/挂起冷备」页的 listPage 不在轮询里 → 停在该页时永远看旧数据。
@@ -601,6 +624,8 @@ function apply(ctx) {
           try { silentRefresh() } catch (e) {}
           try { if (sopId) loadSop(sopId) } catch (e) {}
           try { if (tipId) loadClientTip(tipId) } catch (e) {}
+          // 2026-11-11（1.3.0）：写库后档案也可能跟着变（阶段/结果/下次跟进），顺手刷一遍档案索引
+          try { loadProfiles() } catch (e) {}
         }, [silentRefresh, sopId, tipId])
 
         useEffect(() => safeEffect('listeners', () => {
@@ -831,6 +856,8 @@ function apply(ctx) {
               try { loadTasks() } catch (e) {}
               try { loadSummary() } catch (e) {}
               try { loadFirstCall() } catch (e) {}
+              // 2026-11-11（1.3.0）：档案也先拉一遍（一条 list 请求，按手机号建索引；失败不影响看板）
+              try { loadProfiles() } catch (e) {}
             } else {
               // 配置接口读不通（宿主重启/未加载）：**不要伪造一份 cfg**，否则闸门会放行、渲染出一个空看板。
               //   保持 cfg=null → 闸门继续给 bootScreen（含原因 + 重新读取），宿主回来后一键恢复。
@@ -1406,6 +1433,254 @@ function apply(ctx) {
               uiBtn('关闭', function () { setPanelOpen(false) }, false)))
         }
 
+        // ===== 2026-11-11（1.3.0）：客户档案卡 + 手机号识别 + SOP 归段 =====
+        function phoneKey(p) {
+          const m = String(p == null ? '' : p).match(/1\d{10}/)
+          if (m) return m[0]
+          return String(p == null ? '' : p).replace(/[^0-9]/g, '')
+        }
+        function profileFieldsFrom(c, rec) {
+          const p = (rec && rec.profile) || {}
+          const d = (rec && rec.derived) || {}
+          const g = (k, fb) => { const v = p[k]; return (v === undefined || v === null) ? String(fb == null ? '' : fb) : String(v) }
+          return {
+            intro: g('intro', ''),
+            industry: g('industry', (c && c.industry) || ''),
+            scale: g('scale', (c && c.scale) || ''),
+            people: g('people', [d.name, d.contact].filter(Boolean).join(' / ')),
+            chain: g('chain', ''),
+            need: g('need', (c && c.need) || ''),
+            product: g('product', (c && c.product) || ''),
+            budget: g('budget', (c && c.budget) || ''),
+            rival: g('rival', ''),
+            compliance: g('compliance', ''),
+            strategy: g('strategy', ''),
+          }
+        }
+        // 档案列表一次取回按手机号建索引（列表接口不支持时就退回"点开档案时单条 get"）
+        function loadProfiles() {
+          fetchData('profile', { action: 'list' }).then(function (r) {
+            if (!r || !r.ok) return
+            const d = r.data || {}
+            const arr = Array.isArray(d.profiles) ? d.profiles : (Array.isArray(d.list) ? d.list : (Array.isArray(d.items) ? d.items : (Array.isArray(d) ? d : [])))
+            const map = {}
+            arr.forEach(function (it) {
+              if (!it || typeof it !== 'object') return
+              const k = phoneKey(it.phone || (it.customer && it.customer.phone) || '')
+              if (!k) return
+              map[k] = { profile: it.profile || it.fields || null, derived: it.derived || null }
+            })
+            setProfiles(map)
+          }).catch(function () { /* 列不出来不影响看板：点「📝 档案」时单条取 */ })
+        }
+        function openProfileEdit(c) {
+          const k = phoneKey(c && c.phone)
+          if (!k) return
+          if (profEdit && profEdit.phone === k) { setProfEdit(null); return }
+          const rec = profiles[k]
+          setProfEdit({ phone: k, name: (c && c.name) || '', customer: c, fields: profileFieldsFrom(c, rec), busy: false, aiBusy: false, loading: !rec, msg: null })
+          if (rec) return
+          fetchData('profile', { action: 'get', phone: k }).then(function (r) {
+            if (!r || !r.ok) {
+              setProfEdit(function (p) {
+                return (p && p.phone === k) ? Object.assign({}, p, { loading: false, msg: { tone: 'err', text: '档案读取失败：' + String((r && r.error) || '后端没有返回原因') + '（不影响填写，保存时会再写一次）' } }) : p
+              })
+              return
+            }
+            const d = r.data || {}
+            setProfiles(function (prev) { const n = Object.assign({}, prev); n[k] = { profile: d.profile || null, derived: d.derived || null }; return n })
+            setProfEdit(function (p) {
+              return (p && p.phone === k) ? Object.assign({}, p, { loading: false, fields: profileFieldsFrom(p.customer || c, { profile: d.profile, derived: d.derived }) }) : p
+            })
+          }).catch(function (e) {
+            setProfEdit(function (p) {
+              return (p && p.phone === k) ? Object.assign({}, p, { loading: false, msg: { tone: 'err', text: '档案读取异常：' + String((e && e.message) || e) } }) : p
+            })
+          })
+        }
+        function patchProfField(k, v) {
+          setProfEdit(function (p) { if (!p) return p; const f = Object.assign({}, p.fields); f[k] = v; return Object.assign({}, p, { fields: f }) })
+        }
+        function saveProfileEdit() {
+          const pe = profEdit
+          if (!pe || pe.busy) return
+          setProfEdit(Object.assign({}, pe, { busy: true, msg: { tone: 'info', text: '正在保存…' } }))
+          fetchData('profile', { action: 'set', phone: pe.phone, fields: pe.fields }).then(function (r) {
+            if (!r || !r.ok) {
+              setProfEdit(function (p) {
+                return (p && p.phone === pe.phone) ? Object.assign({}, p, { busy: false, msg: { tone: 'err', text: '没保存成功：' + String((r && r.error) || '后端没有返回原因') } }) : p
+              })
+              return
+            }
+            const d = r.data || {}
+            const prof = d.profile || pe.fields
+            setProfiles(function (prev) {
+              const n = Object.assign({}, prev)
+              n[pe.phone] = Object.assign({}, (prev[pe.phone] || {}), { profile: prof })
+              return n
+            })
+            setProfEdit(Object.assign({}, pe, {
+              busy: false,
+              fields: profileFieldsFrom(pe.customer, { profile: prof, derived: (profiles[pe.phone] || {}).derived }),
+              msg: { tone: 'ok', text: '已保存到客户档案（只按手机号关联，不动客户表其它列）' },
+            }))
+          }).catch(function (e) {
+            setProfEdit(function (p) {
+              return (p && p.phone === pe.phone) ? Object.assign({}, p, { busy: false, msg: { tone: 'err', text: '保存异常：' + String((e && e.message) || e) } }) : p
+            })
+          })
+        }
+        function aiProfileFill() {
+          const pe = profEdit
+          if (!pe || pe.aiBusy) return
+          setProfEdit(Object.assign({}, pe, { aiBusy: true, msg: { tone: 'info', text: 'AI 正在从客户表/流水里提炼档案…' } }))
+          fetchData('ai', { purpose: 'profile', phone: pe.phone }).then(function (r) {
+            if (!r || !r.ok) {
+              setProfEdit(function (p) {
+                return (p && p.phone === pe.phone) ? Object.assign({}, p, { aiBusy: false, msg: { tone: 'err', text: 'AI 提炼失败：' + String((r && r.error) || '后端没有返回原因') } }) : p
+              })
+              return
+            }
+            const txt = String((r.data && r.data.text) || '').trim()
+            if (!txt) {
+              setProfEdit(function (p) {
+                return (p && p.phone === pe.phone) ? Object.assign({}, p, { aiBusy: false, msg: { tone: 'err', text: 'AI 没给出内容（返回是空的）' } }) : p
+              })
+              return
+            }
+            // 模型可能回 JSON（键＝档案字段）→ 按键回填；也可能回一段话 → 整段放进「一句话介绍」。
+            let patch = null
+            try {
+              const s = txt.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim()
+              const o = JSON.parse(s)
+              if (o && typeof o === 'object' && !Array.isArray(o)) {
+                patch = {}
+                PROFILE_FIELDS_UI.forEach(function (f) { if (typeof o[f[0]] === 'string' && o[f[0]].trim()) patch[f[0]] = o[f[0]] })
+                if (!Object.keys(patch).length) patch = null
+              }
+            } catch (e) { patch = null }
+            setProfEdit(function (p) {
+              if (!p || p.phone !== pe.phone) return p
+              const f = Object.assign({}, p.fields)
+              if (patch) Object.assign(f, patch)
+              else f.intro = (f.intro ? f.intro + '\n' : '') + txt
+              return Object.assign({}, p, {
+                aiBusy: false,
+                fields: f,
+                msg: { tone: 'ok', text: patch ? ('已把 AI 提炼的 ' + Object.keys(patch).length + ' 个字段填进表单——还没落盘，确认后再点「保存档案」') : '已把 AI 提炼内容填进「一句话介绍」——还没落盘，改完再点「保存档案」' },
+              })
+            })
+          }).catch(function (e) {
+            setProfEdit(function (p) {
+              return (p && p.phone === pe.phone) ? Object.assign({}, p, { aiBusy: false, msg: { tone: 'err', text: 'AI 提炼异常：' + String((e && e.message) || e) } }) : p
+            })
+          })
+        }
+        function profileLine(label, val) {
+          const v = String(val == null ? '' : val).trim()
+          if (!v) return null
+          return React.createElement('div', { key: 'pl' + label, style: { display: 'flex', gap: 6, fontSize: 11, lineHeight: 1.5 } },
+            React.createElement('span', { style: { color: THEME.text3, flexShrink: 0 } }, label),
+            React.createElement('span', { style: { color: THEME.text1, wordBreak: 'break-word', overflowWrap: 'anywhere' } }, v))
+        }
+        // 区域一的档案卡（只读）：intro / 行业·规模·城市·来源 / 决策人与决策链 / 需求 / 产品·预算·竞对·合规·打法
+        function profileCard(c) {
+          const k = phoneKey(c && c.phone)
+          if (!k) {
+            return React.createElement('div', { style: { marginTop: 3, fontSize: 11, color: THEME.warn } },
+              '⚠ 缺手机号：客户表里补上手机号才能建档/归段（手机号是客户主键）')
+          }
+          const rec = profiles[k]
+          const p = (rec && rec.profile) || {}
+          const d = (rec && rec.derived) || {}
+          const fallback = [p.industry || (c && c.industry), p.scale || (c && c.scale),
+            (c && c.city && c.city !== '未知') ? c.city : '', (c && c.source) || ''].filter(Boolean).join(' · ')
+          const lines = [
+            p.intro ? React.createElement('div', { key: 'intro', style: { fontSize: 11, lineHeight: 1.55, color: THEME.text1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } }, p.intro) : null,
+            profileLine('行业/规模/城市/来源', fallback),
+            profileLine('决策人', p.people || [d.name, d.contact].filter(Boolean).join(' / ')),
+            profileLine('决策链', p.chain),
+            profileLine('需求', p.need),
+            profileLine('产品', p.product),
+            profileLine('预算', p.budget),
+            profileLine('竞对', p.rival),
+            profileLine('合规', p.compliance),
+            profileLine('打法', p.strategy),
+          ].filter(Boolean)
+          return React.createElement('div', { style: { marginTop: 3, padding: '5px 8px', borderRadius: 6, background: 'rgba(64,192,120,.05)', border: '1px dashed rgba(64,192,120,.3)', display: 'flex', flexDirection: 'column', gap: 2 } },
+            React.createElement('div', { style: { fontSize: 10.5, color: THEME.ok, fontWeight: 600 } },
+              '📇 档案' + (lines.length ? '' : '（还没有档案：点「📝 档案」建一份，或让 AI 提炼）')),
+            lines.length ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1 } }, lines) : null)
+        }
+        // 档案编辑面板（11 字段 + AI 提炼 + 保存）
+        function profileEditPanel(c) {
+          const pe = profEdit
+          if (!pe || pe.phone !== phoneKey(c && c.phone)) return null
+          const ctlStyle = { width: '100%', boxSizing: 'border-box', background: 'var(--row-bg, rgba(128,128,128,.06))', color: THEME.text1, border: '1px solid ' + THEME.border, borderRadius: 6, padding: '3px 6px', fontSize: 11.5, fontFamily: 'inherit', resize: 'vertical' }
+          const inputs = PROFILE_FIELDS_UI.map(function (f) {
+            const key = f[0], label = f[1]
+            const val = String((pe.fields || {})[key] || '')
+            const big = key === 'intro' || key === 'need' || key === 'strategy' || key === 'chain'
+            return React.createElement('label', { key: key, style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              React.createElement('span', { style: { fontSize: 10.5, color: THEME.text3 } }, label),
+              big
+                ? React.createElement('textarea', { value: val, rows: 2, onChange: (e) => patchProfField(key, e.target.value), style: ctlStyle })
+                : React.createElement('input', { type: 'text', value: val, onChange: (e) => patchProfField(key, e.target.value), style: ctlStyle }))
+          })
+          const msgColor = pe.msg ? (pe.msg.tone === 'err' ? THEME.danger : (pe.msg.tone === 'ok' ? THEME.ok : THEME.text2)) : THEME.text2
+          return React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(64,192,120,.06)', borderRadius: 6, border: '1px solid rgba(64,192,120,.35)', fontSize: 12 } },
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, flexWrap: 'wrap' } },
+              React.createElement('span', { style: { fontWeight: 700, color: THEME.ok } }, '📝 客户档案 · ' + (pe.name || '') + ' · ' + pe.phone),
+              pe.loading ? React.createElement('span', { style: { fontSize: 10.5, color: THEME.text3 } }, '读取中…') : null,
+              React.createElement('span', { style: { fontSize: 10.5, color: THEME.text3 } }, '手机号是主键（只读）；这里只写档案，不动客户表其它列')),
+            React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 6 } }, inputs),
+            pe.msg ? React.createElement('div', { style: { marginTop: 6, fontSize: 11, color: msgColor } }, pe.msg.text) : null,
+            React.createElement('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
+              React.createElement('button', { onClick: saveProfileEdit, disabled: !!pe.busy, title: '保存到客户档案（按手机号关联）', style: { background: 'rgba(64,192,120,.18)', border: '1px solid rgba(64,192,120,.5)', borderRadius: 6, padding: '4px 10px', cursor: pe.busy ? 'default' : 'pointer', color: THEME.text1, fontSize: 12 } }, pe.busy ? '保存中…' : '💾 保存档案'),
+              React.createElement('button', { onClick: aiProfileFill, disabled: !!pe.aiBusy, title: '让 AI 从客户表/流水里提炼一份草稿（只填表单，不落盘）', style: { background: 'rgba(80,120,255,.14)', border: '1px solid rgba(80,120,255,.45)', borderRadius: 6, padding: '4px 10px', cursor: pe.aiBusy ? 'default' : 'pointer', color: THEME.text1, fontSize: 12 } }, pe.aiBusy ? 'AI 提炼中…' : '🧠 AI 提炼（需确认）'),
+              React.createElement('button', { onClick: () => setProfEdit(null), style: { background: 'none', border: '1px solid ' + THEME.border, borderRadius: 6, padding: '4px 10px', cursor: 'pointer', color: THEME.text2, fontSize: 12 } }, '关闭')),
+            React.createElement('div', { style: { marginTop: 4, fontSize: 10.5, color: THEME.text3 } }, 'AI 提炼只填表单、不自动落盘；确认内容后点「保存档案」才写。'))
+        }
+        // SOP 归段下拉：13 段 + 出口 + 其他跟进记录；选完立刻调 stagefix，成功后重拉该客户 SOP
+        function stageFixSelect(c, rec) {
+          const k = phoneKey(c && c.phone)
+          const key = k + '|' + String((rec && rec.id) || '')
+          const busy = stageBusy === key
+          const cur = String((rec && rec.stage) || '')
+          const opts = SOP_STAGE_FIX.slice()
+          if (cur && opts.indexOf(cur) === -1) opts.unshift(cur)
+          return React.createElement('select', {
+            key: 'fix' + String((rec && rec.id) || ''),
+            value: cur,
+            disabled: !k || busy,
+            title: k ? '归段：把这条跟进挪进 SOP 的哪一段（选完立刻保存）' : '客户表里没有手机号，没法归段',
+            onChange: (e) => stageFix(c, rec, e.target.value),
+            style: { flexShrink: 0, fontSize: 10.5, maxWidth: 118, background: 'var(--row-bg, rgba(128,128,128,.06))', color: THEME.text1, border: '1px solid ' + THEME.border, borderRadius: 5, padding: '1px 2px' },
+          },
+            React.createElement('option', { value: '' }, busy ? '保存中…' : '归段…'),
+            opts.map(function (o) { return React.createElement('option', { key: o, value: o }, o) }))
+        }
+        function stageFix(c, rec, stage) {
+          const k = phoneKey(c && c.phone)
+          if (!k) { setStageMsg({ tone: 'err', text: '这个客户没有手机号，没法归段' }); return }
+          if (!stage) return
+          const key = k + '|' + String((rec && rec.id) || '')
+          setStageBusy(key); setStageMsg(null)
+          fetchData('stagefix', { phone: k, flowId: (rec && rec.id), stage: stage }).then(function (r) {
+            setStageBusy('')
+            if (!r || !r.ok) {
+              setStageMsg({ tone: 'err', text: '归段没成功：' + String((r && r.error) || '后端没有返回原因') })
+              return
+            }
+            const d = r.data || {}
+            setStageMsg({ tone: 'ok', text: '已归段：' + String(d.from || '（空）') + ' → ' + String(d.to || stage) })
+            try { loadSop(c.id) } catch (e) {}
+          }).catch(function (e) {
+            setStageBusy('')
+            setStageMsg({ tone: 'err', text: '归段异常：' + String((e && e.message) || e) })
+          })
+        }
+
         // 2026-10-22 用户：「只展示小数点后两位，单位定为万元」——金额一律走 fmtWan2，
         //   库里存元（累加会有 73296.49999999999 这种浮点尾巴），展示时先按分四舍五入再换算；
         //   数字卡把单位写在卡片标题里（「付款合计（万元）」），数字只留两位小数。
@@ -1529,8 +1804,11 @@ function apply(ctx) {
           if (!d) return React.createElement('div', { style: boxStyle }, '加载中…')
           if (!d.ok) return React.createElement('div', { style: boxStyle }, 'SOP 加载失败: ' + (d.error || ''))
           const sop = d.sop || {}
-          const recLine = (r, i) => React.createElement('div', { key: 'r' + i, style: { fontSize: 11, color: THEME.text2, lineHeight: 1.5, paddingLeft: 10 } },
-            '📋 ' + String(r.date || '').slice(5) + ' ' + (r.what || ''))
+          // 2026-11-11（1.3.0）：每条跟进右侧给「归段」下拉——老数据没写阶段的，直接在 SOP 里点一下归位。
+          const recLine = (r, i) => React.createElement('div', { key: 'r' + i, style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: THEME.text2, lineHeight: 1.5, paddingLeft: 10 } },
+            React.createElement('span', { style: { flex: 1, minWidth: 0, wordBreak: 'break-word', overflowWrap: 'anywhere' } },
+              '📋 ' + String(r.date || '').slice(5) + ' ' + (r.what || '')),
+            stageFixSelect(c, r))
           const stageBlock = (s) => React.createElement('div', { key: (s.exit ? 'x-' : 'm-') + s.stage, style: { padding: '4px 8px', borderRadius: 6, background: s.current ? 'rgba(80,120,255,.10)' : 'transparent', border: s.current ? '1px solid rgba(80,120,255,.35)' : '1px solid transparent' } },
             React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, fontWeight: s.current ? 700 : 500 } },
               React.createElement('span', { style: { color: s.exit ? THEME.danger : THEME.blue, width: s.exit ? 'auto' : 74, flexShrink: 0 } }, s.exit ? ('出口·' + s.stage) : (s.seq + '. ' + s.stage)),
@@ -1542,10 +1820,12 @@ function apply(ctx) {
               '📋 ' + (d.name || c.name || '') + ' 的 SOP　' + (sop.progress || '') + ' · 结果：' + (sop.result || '—')),
             React.createElement('div', { style: { fontSize: 11, color: THEME.text2, marginBottom: 6 } },
               (sop.note || '') + (sop.nextStage ? '　下一段：' + sop.nextStage : '') + '　（共 ' + (sop.total || 0) + ' 条跟进' + (sop.coverage ? '：段内 ' + sop.coverage.staged + ' · 其他跟进记录 ' + sop.coverage.unlabeled : '') + '）'),
+            // 2026-11-11（1.3.0）：归段回执（成功/失败都就近显示在这张 SOP 卡里，后端 error 原样上屏）
+            stageMsg ? React.createElement('div', { style: { fontSize: 11, marginBottom: 4, color: stageMsg.tone === 'err' ? THEME.danger : (stageMsg.tone === 'ok' ? THEME.ok : THEME.text2) } }, stageMsg.text) : null,
             (sop.stages || []).map(stageBlock),
             (sop.exits || []).filter(x => x.count || x.current).map(stageBlock),
             (sop.unlabeled && sop.unlabeled.length) ? React.createElement('div', null,
-              React.createElement('div', { style: { fontSize: 12, color: THEME.text2, marginTop: 4 } }, '其他跟进记录（' + sop.unlabeled.length + ' 条）'),
+              React.createElement('div', { style: { fontSize: 12, color: THEME.text2, marginTop: 4 } }, '其他跟进记录（' + sop.unlabeled.length + ' 条）· 待归段，目标 0'),
               React.createElement('div', { style: { fontSize: 10, color: THEME.text2, opacity: .75, paddingLeft: 2 } }, '归不到 13 段/出口的记录放这里（老数据没写阶段，或记录时显式选「其他跟进记录」）'),
               sop.unlabeled.map(recLine)) : null,
             aiBlock(d.ai, () => loadSopAi(c.id), '🧠 AI 话术'))
@@ -1563,19 +1843,23 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 11, color: 'var(--text-2,#888)', lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
               (c.contact ? c.contact : '') + (c.phone ? '  ' + c.phone : '') + (isOverdue && c.reason ? '  ·  ' + c.reason : (c.city && c.city !== '未知' ? '  ' + c.city : ''))),
               intentTags(c) ? React.createElement('span', { title: intentTags(c), style: { fontSize: 10, color: THEME.tagColor, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere', opacity: .9 } }, '📊 ' + intentTags(c)) : null,
-              (c.hist && c.hist.length) ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2, borderTop: '1px dashed rgba(128,128,128,.25)', paddingTop: 3 } },
-                c.hist.map((h, i) => React.createElement('span', { key: i, style: { fontSize: 10, color: 'var(--text-2,#999)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
-                  '📋 ' + String(h.date || '').slice(5) + ' ' + (h.what || '')))
-              ) : null,
+              // 2026-11-11（1.3.0）：区域一不再堆跟进记录（只在 SOP 里看），换成客户/公司档案卡。
+              profileCard(c),
             ),
             React.createElement('span', { style: { fontSize: 11, color: 'var(--text-2,#888)', flexShrink: 0 } }, c.status || ''),
             React.createElement('span', { style: { fontSize: 11, color: isOverdue ? THEME.danger : THEME.text2, flexShrink: 0 } }, isOverdue ? '逾期 ' + (c.next || '') : (c.next || '')),
+            // 2026-11-11（1.3.0）：档案入口按手机号走——没有手机号就不给入口，直接标「缺手机号」。
+            phoneKey(c.phone)
+              ? React.createElement('button', { onClick: () => openProfileEdit(c), title: '客户档案：公司介绍/决策链/需求/预算/竞对/打法（可 AI 提炼，保存才落盘）', style: { background: (profEdit && profEdit.phone === phoneKey(c.phone)) ? 'rgba(64,192,120,.35)' : 'rgba(64,192,120,.12)', border: '1px solid rgba(64,192,120,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📝 档案')
+              : React.createElement('span', { title: '客户表里没有手机号：补上手机号才能建档/归段', style: { fontSize: 10, color: THEME.warn, border: '1px dashed ' + THEME.warn, borderRadius: 4, padding: '1px 5px', flexShrink: 0 } }, '⚠ 缺手机号'),
             React.createElement('button', { onClick: () => liveLaunch(c), title: '通话记录台：电话开外放 → 本机实时转写 + 该接的话 + 结束自动出跟进记录草稿', style: { background: 'rgba(201,42,42,.12)', border: '1px solid rgba(201,42,42,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '🎧'),
             copyBtn(c),
             React.createElement('button', { onClick: () => { if (showTip) setTipId(null); else loadClientTip(c.id) }, style: { background: showTip ? 'rgba(80,120,255,.35)' : 'rgba(80,120,255,.12)', border: '1px solid rgba(80,120,255,.4)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📖 跟进提示'),
             React.createElement('button', { onClick: () => { if (showSop) setSopId(null); else loadSop(c.id) }, title: '按 SOP 阶段看这个客户的完整跟进轨迹（13 段漏斗 + 出口）', style: { background: showSop ? 'rgba(64,192,120,.35)' : 'rgba(64,192,120,.12)', border: '1px solid rgba(64,192,120,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📋 SOP'),
           )
-          if (!showTip && !showSop) return rowEl
+          // 2026-11-11（1.3.0）：档案编辑面板也算一种展开——没展开提示/SOP 时也要让它露出来。
+          const showProfEdit = !!(profEdit && profEdit.phone === phoneKey(c.phone))
+          if (!showTip && !showSop && !showProfEdit) return rowEl
           const tipEl = !showTip ? null : (tipData && tipData.ok
             ? React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(80,120,255,.06)', borderRadius: 6, border: '1px solid rgba(80,120,255,.2)', fontSize: 12 } },
                 React.createElement('div', { style: { fontWeight: 700, color: THEME.blue, marginBottom: 4 } }, '📖 跟进提示（' + (tipData.name || c.name) + '，命中 ' + (tipData.hits || 0) + ' 条）'),
@@ -1588,7 +1872,7 @@ function apply(ctx) {
                 aiBlock(tipData.ai, () => loadTipAi(c.id), '🧠 AI 切入'),
               )
             : React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(128,128,128,.06)', borderRadius: 6, fontSize: 12, color: 'var(--text-2,#999)' } }, tipData ? ('提示加载失败: ' + (tipData.error || '')) : '加载中…'))
-          return React.createElement('div', { key: c.id, style: { display: 'flex', flexDirection: 'column', marginBottom: 4 } }, [rowEl, tipEl, showSop ? sopPanel(c) : null])
+          return React.createElement('div', { key: c.id, style: { display: 'flex', flexDirection: 'column', marginBottom: 4 } }, [rowEl, tipEl, showSop ? sopPanel(c) : null, profileEditPanel(c)])
         }
         function firstCallRow(c, idx, tipId, tipData, loadClientTip, setTipId) {
           const showTip = tipId === c.id
@@ -1615,7 +1899,9 @@ function apply(ctx) {
             React.createElement('button', { onClick: () => { if (showTip) setTipId(null); else loadClientTip(c.id) }, style: { background: showTip ? 'rgba(80,120,255,.35)' : 'rgba(80,120,255,.12)', border: '1px solid rgba(80,120,255,.4)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📖 跟进提示'),
             React.createElement('button', { onClick: () => { if (showSop) setSopId(null); else loadSop(c.id) }, title: '按 SOP 阶段看这个客户的完整跟进轨迹（13 段漏斗 + 出口）', style: { background: showSop ? 'rgba(64,192,120,.35)' : 'rgba(64,192,120,.12)', border: '1px solid rgba(64,192,120,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📋 SOP'),
           )
-          if (!showTip && !showSop) return rowEl
+          // 2026-11-11（1.3.0）：档案编辑面板也算一种展开——没展开提示/SOP 时也要让它露出来。
+          const showProfEdit = !!(profEdit && profEdit.phone === phoneKey(c.phone))
+          if (!showTip && !showSop && !showProfEdit) return rowEl
           const tipEl = !showTip ? null : (tipData && tipData.ok
             ? React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(80,120,255,.06)', borderRadius: 6, border: '1px solid rgba(80,120,255,.2)', fontSize: 12 } },
                 React.createElement('div', { style: { fontWeight: 700, color: THEME.blue, marginBottom: 4 } }, '📖 跟进提示（' + (tipData.name || c.name) + '，命中 ' + (tipData.hits || 0) + ' 条）'),
@@ -1641,11 +1927,7 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 11, color: 'var(--text-2,#888)', lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
                 (c.contact ? c.contact : '') + (c.phone ? '  ' + c.phone : '') + (c.note ? '  ·  ' + c.note : '')),
               intentTags(c) ? React.createElement('span', { title: intentTags(c), style: { fontSize: 10, color: 'var(--tag-color, #69db7c)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere', opacity: .9 } }, '📊 ' + intentTags(c)) : null,
-              // 2026-09-10 用户要求: 重新出现在今日任务(大更触达)时，显示历史跟进记录+日期
-              (c.hist && c.hist.length) ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2, borderTop: '1px dashed rgba(255,215,0,.25)', paddingTop: 3 } },
-                c.hist.map((h, i) => React.createElement('span', { key: i, style: { fontSize: 10, color: 'var(--text-2,#999)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
-                  '📋 ' + String(h.date || '').slice(5) + ' ' + (h.what || '')))
-              ) : null,
+              // 2026-11-11（1.3.0）：区域一不再堆跟进记录（历史记录统一到「📋 SOP」里看），这里留空。
             ),
             React.createElement('span', { style: { fontSize: 11, color: 'var(--gold-color, #9a6700)', flexShrink: 0 } }, c.remind || ''),
             copyBtn(c),
@@ -1666,17 +1948,16 @@ function apply(ctx) {
               React.createElement('span', { style: { fontSize: 11, color: 'var(--text-2,#888)', lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
                 (c.contact ? c.contact : '') + (c.phone ? '  ' + c.phone : '') + (c.lastDate ? '  ·  最后跟进 ' + c.lastDate : '  ·  无流水')),
               intentTags(c) ? React.createElement('span', { title: intentTags(c), style: { fontSize: 10, color: 'var(--tag-color, #69db7c)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere', opacity: .9 } }, '📊 ' + intentTags(c)) : null,
-              (c.hist && c.hist.length) ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2, borderTop: '1px dashed rgba(128,128,128,.25)', paddingTop: 3 } },
-                c.hist.map((h, i) => React.createElement('span', { key: i, style: { fontSize: 10, color: 'var(--text-2,#999)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
-                  '📋 ' + String(h.date || '').slice(5) + ' ' + (h.what || '')))
-              ) : null,
+              // 2026-11-11（1.3.0）：历史跟进记录只在「📋 SOP」里看，区域一不再重复堆。
             ),
             React.createElement('span', { style: { fontSize: 11, color: stale ? THEME.danger : THEME.text2, flexShrink: 0 } }, stale ? '⚠️ 已静默 ' + sd + ' 天' : (sd === null ? '待定' : '静默 ' + sd + ' 天')),
             copyBtn(c),
             React.createElement('button', { onClick: () => { if (showTip) setTipId(null); else loadClientTip(c.id) }, style: { background: showTip ? 'rgba(80,120,255,.35)' : 'rgba(80,120,255,.12)', border: '1px solid rgba(80,120,255,.4)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📖 跟进提示'),
             React.createElement('button', { onClick: () => { if (showSop) setSopId(null); else loadSop(c.id) }, title: '按 SOP 阶段看这个客户的完整跟进轨迹（13 段漏斗 + 出口）', style: { background: showSop ? 'rgba(64,192,120,.35)' : 'rgba(64,192,120,.12)', border: '1px solid rgba(64,192,120,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📋 SOP'),
           )
-          if (!showTip && !showSop) return rowEl
+          // 2026-11-11（1.3.0）：档案编辑面板也算一种展开——没展开提示/SOP 时也要让它露出来。
+          const showProfEdit = !!(profEdit && profEdit.phone === phoneKey(c.phone))
+          if (!showTip && !showSop && !showProfEdit) return rowEl
           const tipEl = !showTip ? null : (tipData && tipData.ok
             ? React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(80,120,255,.06)', borderRadius: 6, border: '1px solid rgba(80,120,255,.2)', fontSize: 12 } },
                 React.createElement('div', { style: { fontWeight: 700, color: THEME.blue, marginBottom: 4 } }, '📖 跟进提示（' + (tipData.name || c.name) + '，命中 ' + (tipData.hits || 0) + ' 条）'),
@@ -1706,17 +1987,16 @@ function apply(ctx) {
                 stageTag(c), resultTag(c), trackTag(c)),
               React.createElement('span', { style: { fontSize: 11, color: 'var(--text-2,#888)', lineHeight: 1.45, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
                 (c.contact ? c.contact : '') + (c.phone ? '  ' + c.phone : '') + (c.lastDate ? '  ·  最后跟进 ' + c.lastDate : '  ·  无流水')),
-              (c.hist && c.hist.length) ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 1, marginTop: 2, borderTop: '1px dashed rgba(255,107,107,.25)', paddingTop: 3 } },
-                c.hist.map((h, i) => React.createElement('span', { key: i, style: { fontSize: 10, color: 'var(--text-2,#999)', lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word', overflowWrap: 'anywhere' } },
-                  '📋 ' + String(h.date || '').slice(5) + ' ' + (h.what || '')))
-              ) : null,
+              // 2026-11-11（1.3.0）：历史跟进记录只在「📋 SOP」里看，区域一不再重复堆。
             ),
             React.createElement('span', { style: { fontSize: 11, fontWeight: 700, color: od ? THEME.danger : THEME.warn, flexShrink: 0 } }, dueTxt),
             copyBtn(c),
             React.createElement('button', { onClick: () => { if (showTip) setTipId(null); else loadClientTip(c.id) }, style: { background: showTip ? 'rgba(80,120,255,.35)' : 'rgba(80,120,255,.12)', border: '1px solid rgba(80,120,255,.4)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📖 跟进提示'),
             React.createElement('button', { onClick: () => { if (showSop) setSopId(null); else loadSop(c.id) }, title: '按 SOP 阶段看这个客户的完整跟进轨迹（13 段漏斗 + 出口）', style: { background: showSop ? 'rgba(64,192,120,.35)' : 'rgba(64,192,120,.12)', border: '1px solid rgba(64,192,120,.45)', borderRadius: 6, padding: '3px 8px', color: THEME.text1, cursor: 'pointer', fontSize: 12, flexShrink: 0 } }, '📋 SOP'),
           )
-          if (!showTip && !showSop) return rowEl
+          // 2026-11-11（1.3.0）：档案编辑面板也算一种展开——没展开提示/SOP 时也要让它露出来。
+          const showProfEdit = !!(profEdit && profEdit.phone === phoneKey(c.phone))
+          if (!showTip && !showSop && !showProfEdit) return rowEl
           const tipEl = !showTip ? null : (tipData && tipData.ok
             ? React.createElement('div', { style: { marginTop: 4, padding: '8px 10px', background: 'rgba(80,120,255,.06)', borderRadius: 6, border: '1px solid rgba(80,120,255,.2)', fontSize: 12 } },
                 React.createElement('div', { style: { fontWeight: 700, color: THEME.blue, marginBottom: 4 } }, '📖 跟进提示（' + (tipData.name || c.name) + '，命中 ' + (tipData.hits || 0) + ' 条）'),
@@ -3187,17 +3467,54 @@ function apply(ctx) {
     var AI_DOCK_TEXT_MAX = 12000
     // 面板身份：附件正文要按面板跨轮复用（服务端 FILE_CACHE 用它做 key）。换个浏览器/清缓存就换一个。
     var AI_DOCK_PANEL = AI_DOCK_KEY + '.panel'
-    // 2026-10-22（用户 m01733）：写卡只带客户ID，面板就只显示「客户 C-未知-2609-813」，
-    //   用户拿它跟旁边 SOP 卡顶部的公司名对不上，看着像写错了人（其实是同一个客户）。
-    //   服务端已把客户名挂在 card.customer 上，这里统一出一行「公司名（联系人）· 客户ID」。
+    // 2026-11-11（1.3.0）：客户标识**一律用手机号**，不再出现 C- 开头的客户ID。
+    //   原「公司名（联系人）· 客户ID」那一版用户看不出是哪个客户（ID 跟旁边 SOP 卡顶部的公司名对不上）；
+    //   手机号是客户表的主识别键（同一号码只允许一个客户），面板里也是用户自己熟悉的标识。
     function aiDockCustLabel(card) {
       var a = (card && card.args) || {}
       var c = (card && card.customer) || null
-      var id = String(a.id || (c && c.id) || '')
-      if (c && String(c.name || '').trim()) {
-        return String(c.name).trim() + (c.contact ? '（' + String(c.contact).trim() + '）' : '') + (id ? ' · ' + id : '')
-      }
-      return id
+      var phone = String(a.phone || (c && c.phone) || '').trim()
+      var name = String((c && c.name) || '').trim()
+      var contact = String((c && c.contact) || '').trim()
+      var head = name ? (name + (contact ? '（' + contact + '）' : '')) : contact
+      if (phone) return (head ? head + ' · ' : '') + phone
+      return (head ? head + ' · ' : '') + '缺手机号'
+    }
+    // 确认卡可编辑（1.3.0）：卡的 9 个可改字段 + 三个下拉的取值域。
+    //   手机号只读（改手机号＝换客户，必须走客户表），其它都能在卡上改完再确认。
+    var AI_CARD_FIELDS = [
+      ['what', '事实（聊了什么/做了什么）', 'textarea'],
+      ['date', '日期', 'date'],
+      ['method', '方式', 'method'],
+      ['type', '类型', 'type'],
+      ['stage', '环节', 'stage'],
+      ['react', '对方反应', 'text'],
+      ['nextAction', '下一步', 'text'],
+      ['nextDate', '下次日期', 'date'],
+      ['nextMethod', '下次方式', 'method'],
+    ]
+    var AI_CARD_METHODS = ['电话', '微信', '上门', '短信', '合同', '官网申请', '其他']
+    var AI_CARD_TYPES = ['首触', '试用回访', '高意向跟进', '老客服务', '客户反馈', '策略调整', '放弃跟进', '数据整理']
+    var AI_CARD_STAGES = ['线索获取', '客户触达', '需求挖掘', '产品演示', '异议处理', '方案报价', '成交签约',
+      '企业级机会', '决策链摸排', '需求与现状勘察', '方案与试点设计', '商务推进', '私有化签约',
+      '无法联系', '推进终止', '其他跟进记录']
+    function aiCardDraftOf(card) {
+      var a = (card && card.args) || {}
+      var d = {}
+      for (var i = 0; i < AI_CARD_FIELDS.length; i++) d[AI_CARD_FIELDS[i][0]] = String(a[AI_CARD_FIELDS[i][0]] || '')
+      return d
+    }
+    function aiCardFilled(d) {
+      var n = 0
+      for (var i = 0; i < AI_CARD_FIELDS.length; i++) if (String((d || {})[AI_CARD_FIELDS[i][0]] || '').trim()) n++
+      return n
+    }
+    // 回执里手机号打码（1xx****xxxx）：够认出是谁，又不用把整串号码写在对话里。
+    function aiDockPhoneMask(p) {
+      var s = String(p || '').replace(/[^0-9]/g, '')
+      if (!s) return '—'
+      if (s.length < 7) return s
+      return s.slice(0, 3) + '****' + s.slice(-4)
     }
     function aiDockPanelId() {
       try {
@@ -3543,6 +3860,9 @@ function apply(ctx) {
       var [pick, setPick] = useState(function () { try { return localStorage.getItem(AI_DOCK_KEY + '.model') || '' } catch (e) { return '' } })
       var [note, setNote] = useState('')
       var [card, setCard] = useState(null)
+      // 2026-11-11（1.3.0）：确认卡改成**可编辑**——模型写错的日期/方式/阶段/内容，用户能直接在卡上改，
+      //   不用「重新说一遍」。draft 只存这 9 个可改字段；手机号只读（换手机号＝换客户，得走客户表）。
+      var [cardDraft, setCardDraft] = useState(null)
       var [ask, setAsk] = useState(null)          // 2026-10-21 夜（m06146）：模型反问 → 面板给选项
       var [live, setLive] = useState('')          // 流式已收到的正文（边生成边显示，像 DSH 对话框）
       var [hint, setHint] = useState('')
@@ -3560,6 +3880,15 @@ function apply(ctx) {
       //   能给确认卡写跟进。这里不再有轮询/会话事件，一次请求一个回答。
       // 所有写消息的地方都走这里：内存 + localStorage 一起写（退出插件、重启面板都不丢）
       function setMsgs(next) { setMsgsRaw(next); aiDockSaveMsgs(next) }
+
+      // 2026-11-11（1.3.0）：新确认卡到了 → 把卡里的字段铺进可编辑 draft；卡没了 → draft 一起清掉。
+      useEffect(function () {
+        if (card && card.ok) setCardDraft(aiCardDraftOf(card))
+        else setCardDraft(null)
+      }, [card])
+      function patchCardDraft(k, v) {
+        setCardDraft(function (prev) { var n = Object.assign({}, prev || {}); n[k] = v; return n })
+      }
 
       useEffect(function () { try { localStorage.setItem(AI_DOCK_KEY + '.open', open ? '1' : '0') } catch (e) {} }, [open])
       useEffect(function () {
@@ -3792,18 +4121,21 @@ function apply(ctx) {
       async function confirmCard() {
         if (!card || !card.ok) return
         if (busyRef.current) return
-        if (typeof window !== 'undefined' && window.confirm && !window.confirm('确认把这条跟进写进客户表（主表+流水表）？\n客户 ' + aiDockCustLabel(card) + '\n内容：' + String((card.args && card.args.what) || ''))) return
+        // 2026-11-11（1.3.0）：提交**卡面上编辑后**的字段（cardDraft 覆盖模型原值），
+        //   模型给的其它键（status/level 等）照旧带上，不丢。
+        var submitArgs = Object.assign({}, (card && card.args) || {}, cardDraft || {})
+        if (typeof window !== 'undefined' && window.confirm && !window.confirm('确认把这条跟进写进客户表（主表+流水表）？\n客户 ' + aiDockCustLabel(card) + '\n内容：' + String((submitArgs.what) || ''))) return
         busyRef.current = true
         AI_DOCK_BUSY_SINCE = Date.now()
         setHint('正在写入…')
         var r
-        try { r = await fetchData('assistant', { action: 'log', confirm: true, args: card.args || {} }) } finally { busyRef.current = false }
+        try { r = await fetchData('assistant', { action: 'log', confirm: true, args: submitArgs }) } finally { busyRef.current = false }
         if (r && r.ok === true && !(r.data && r.data.write && r.data.write.ok === false)) {
           // 2026-10-21 体检（m03962 P1）：写库回执字段是 cmdLog 的（stage/stageFrom/autoAdvanced/levelSynced/message），
           //   原来读的是不存在的 write.nextStage/write.levelNote → 永远只显示「已写入流水表」，
           //   阶段到底推没推、等级有没有归一，爹都看不到。改成照实回显 + 服务端 message 一并带上。
           var w = (r.data && r.data.write) || {}
-          var argsW = (card && card.args) || {}
+          var argsW = submitArgs
           var bits = []
           if (w.stage) bits.push('阶段：' + String(w.stageFrom || '?') + ' → ' + String(w.stage) + (w.stageNote ? '（' + String(w.stageNote) + '）' : ''))
           if (w.autoAdvanced && w.nextStage) bits.push('可推进到：' + String(w.nextStage))
@@ -3814,7 +4146,7 @@ function apply(ctx) {
           if (argsW.status) bits.push('状态：' + String(argsW.status))
           if (argsW.level) bits.push('等级：' + String(argsW.level))
           if (w.duplicated) bits.push('这条跟进已存在，本次只补主表回写')
-          var receipt = '✅ 已写进客户表' + (w.flowId ? '（流水 ' + String(w.flowId) + '）' : '') + (bits.length ? '\n' + bits.join('\n') : '') + (w.message ? '\n' + String(w.message) : '')
+          var receipt = '✅ 已写进客户表（主表+流水表）· 手机 ' + aiDockPhoneMask(argsW.phone || (card.customer && card.customer.phone)) + (bits.length ? '\n' + bits.join('\n') : '') + (w.message ? '\n' + String(w.message) : '')
           // 2026-10-28（用户 m03015）：写完立刻把看板 / SOP 详情重拉一遍，并在回执里说一声，
           //   不用用户再教一句「要同步更新到面板显示上」。
           var refreshed = false
@@ -3970,18 +4302,42 @@ function apply(ctx) {
             }),
             React.createElement('button', { onClick: function () { setAsk(null) }, style: { background: 'none', border: '1px solid ' + C.bd, borderRadius: 12, cursor: 'pointer', color: C.t2, fontSize: 11.5, padding: '3px 9px' } }, '不用了')),
           ) : null
+      // 2026-11-11（1.3.0）：卡面上的字段全部可改（手机号只读），改完点「确认写入」才落库。
+      var cd = cardDraft || ((card && card.ok) ? aiCardDraftOf(card) : {})
+      var cardCtlStyle = { background: C.bg, color: C.t1, border: '1px solid ' + C.bd, borderRadius: 6, padding: '2px 5px', fontSize: 11.5, fontFamily: 'inherit', width: '100%', boxSizing: 'border-box' }
+      function aiCardInput(f) {
+        var key = f[0], label = f[1], kind = f[2]
+        var val = String(cd[key] || '')
+        var onCh = function (e) { patchCardDraft(key, e.target.value) }
+        var ctl
+        if (kind === 'textarea') {
+          ctl = React.createElement('textarea', { value: val, rows: 3, onChange: onCh, style: Object.assign({}, cardCtlStyle, { resize: 'vertical', lineHeight: 1.5 }) })
+        } else if (kind === 'date') {
+          ctl = React.createElement('input', { type: 'date', value: val, onChange: onCh, style: cardCtlStyle })
+        } else if (kind === 'method' || kind === 'type' || kind === 'stage') {
+          var opts = kind === 'method' ? AI_CARD_METHODS : (kind === 'type' ? AI_CARD_TYPES : AI_CARD_STAGES)
+          var extra = (val && opts.indexOf(val) === -1) ? React.createElement('option', { value: val }, val + '（模型原值）') : null
+          ctl = React.createElement('select', { value: val, onChange: onCh, style: cardCtlStyle },
+            React.createElement('option', { value: '' }, '（不指定）'),
+            extra,
+            opts.map(function (o) { return React.createElement('option', { key: o, value: o }, o) }))
+        } else {
+          ctl = React.createElement('input', { type: 'text', value: val, onChange: onCh, style: cardCtlStyle })
+        }
+        return React.createElement('label', { key: key, style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+          React.createElement('span', { style: { fontSize: 10.5, color: C.t3 } }, label), ctl)
+      }
       var cardNode = (card && card.ok)
         ? React.createElement('div', { style: { margin: '0 0 8px', padding: '8px 10px', border: '1px solid ' + C.acc, borderRadius: 8, background: 'var(--accent-bg, rgba(37,99,235,.08))' } },
-          React.createElement('div', { style: { fontSize: 12, fontWeight: 700, color: C.t1, marginBottom: 4 } }, '📝 要写一条跟进（点确认才落库）'),
-          React.createElement('div', { style: { fontSize: 11.5, color: C.t2, lineHeight: 1.6, wordBreak: 'break-all' } },
-            '客户 ' + aiDockCustLabel(card) + '\n'),
-          React.createElement('div', { style: { fontSize: 11.5, color: C.t1, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginBottom: 6 } },
-            '方式：' + String((card.args && card.args.method) || '') + '｜类型：' + String((card.args && card.args.type) || '')
-            + (card.args && card.args.status ? '｜状态：' + String(card.args.status) : '')
-            + (card.args && card.args.stage ? '｜阶段：' + String(card.args.stage) : '') + '\n'
-            + '内容：' + String((card.args && card.args.what) || '') + '\n'
-            + (card.args && card.args.react ? '反应：' + card.args.react + '\n' : '')
-            + (card.args && card.args.nextAction ? '下一步：' + card.args.nextAction + (card.args.nextDate ? '（' + card.args.nextDate + '）' : '') + '\n' : '')),
+          React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 } },
+            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: C.t1, flexShrink: 0 } }, '📝 要写一条跟进（点确认才落库）'),
+            React.createElement('span', { title: '就这 9 项可改；没填的可以留空', style: { fontSize: 10.5, color: aiCardFilled(cd) >= AI_CARD_FIELDS.length ? C.ok : C.t3, border: '1px solid ' + C.bd, borderRadius: 10, padding: '0 6px', flexShrink: 0 } }, '已填 ' + aiCardFilled(cd) + '/' + AI_CARD_FIELDS.length + '（未填可留空）')),
+          React.createElement('div', { style: { fontSize: 11.5, color: C.t2, lineHeight: 1.6, wordBreak: 'break-all', marginBottom: 5 } }, '客户 ' + aiDockCustLabel(card)),
+          React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 } },
+            React.createElement('label', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              React.createElement('span', { style: { fontSize: 10.5, color: C.t3 } }, '客户手机号（只读：换手机号＝换客户，请在客户表里改）'),
+              React.createElement('input', { type: 'text', value: String(cd.phone || (card.args && card.args.phone) || (card.customer && card.customer.phone) || ''), readOnly: true, style: Object.assign({}, cardCtlStyle, { opacity: .75, cursor: 'not-allowed' }) })),
+            AI_CARD_FIELDS.map(aiCardInput)),
           (card.fixed && card.fixed.length)
             ? React.createElement('div', { style: { fontSize: 11, color: C.t3, lineHeight: 1.55, marginBottom: 6, whiteSpace: 'pre-wrap' } },
               '✎ 插件替你改了 ' + card.fixed.length + ' 处：\n' + card.fixed.join('\n'))
